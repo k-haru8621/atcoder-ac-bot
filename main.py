@@ -148,6 +148,32 @@ class AtCoderBot(discord.Client):
         # Embed作成
         embed = discord.Embed(color=get_color(difficulty))
         
+        # ヘッダー：アイコンとDiscordユーザー名のみ
+        embed.set_author(
+            name=f"{user_name}",
+            icon_url=user_icon
+        )
+
+        # 本文：問題名(リンク)、user & result、詳細スペック
+        desc = (
+            f"**[{prob_title}](https://atcoder.jp/contests/{sub['contest_id']}/tasks/{prob_id})**\n"
+            f"user : [{atcoder_id}](https://atcoder.jp/users/{atcoder_id}) / result : {emoji} **[{res}]**\n"
+            f"difficulty : {difficulty if difficulty is not None else '---'} / {sub.get('execution_time', '---')}ms / score : {int(sub['point'])}\n"
+            f"language : {sub['language']}\n"
+            f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})"
+        )
+        
+        embed.description = desc
+        
+        # フッター：時刻
+        dt = datetime.fromtimestamp(sub['epoch_second'], JST)
+        embed.set_footer(text=f"提出時間 : {dt.strftime('%Y年%m月%d日(%a) %H:%M:%S')}")
+        
+        await channel.send(embed=embed)
+
+        # Embed作成
+        embed = discord.Embed(color=get_color(difficulty))
+        
         # 2. ヘッダー（アイコン、名前）
         embed.set_author(
             name=f"{user_name} ・ {atcoder_id}",
