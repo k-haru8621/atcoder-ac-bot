@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
-import os, json, requests, aiohttp, re, gspread
+import os, aiohttp, re, gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -24,10 +24,10 @@ def get_rated_color(rating_str):
     match = re.search(r'(\d+)', rating_str)
     if not match: return 0x000000 
     val = int(match.group(1))
-    if val < 1200: return 0x008000 
-    if val < 2000: return 0x0000FF 
-    if val < 2800: return 0xFF8000 
-    return 0xFF0000 
+    if val < 1200: return 0x008000 # 緑
+    if val < 2000: return 0x0000FF # 青
+    if val < 2800: return 0xFF8000 # 橙
+    return 0xFF0000 # 赤
 
 class AtCoderBot(discord.Client):
     def __init__(self):
@@ -39,7 +39,6 @@ class AtCoderBot(discord.Client):
         self.news_config = {}
         self.problems_map = {}
         self.diff_map = {}
-        self.last_sub_ids = set()
         self.sent_notifications = set()
         
         try:
@@ -54,15 +53,15 @@ class AtCoderBot(discord.Client):
         try:
             ws_user = self.sheet.worksheet("users")
             ws_user.clear()
-            ws_user.append_row(["GuildID", "AtCoderID", "DiscordID", "ChannelID", "OnlyAC"])
-            rows = [[str(v['guild_id']), v['atcoder_id'], str(v['discord_user_id']), str(v['channel_id']), str(v['only_ac'])] for v in self.user_data.values()]
+            ws_user.append_row(["GuildID", "AtCoderID", "DiscordID", "ChannelID", "OnlyAC", "LastSubID"])
+            rows = [[str(v['guild_id']), v['atcoder_id'], str(v['discord_user_id']), str(v['channel_id']), str(v['only_ac']), str(v.get('last_sub_id', 0))] for v in self.user_data.values()]
             if rows: ws_user.append_rows(rows)
             ws_config = self.sheet.worksheet("config")
             ws_config.clear()
             ws_config.append_row(["GuildID", "ChannelID"])
             rows_config = [[str(gid), str(cid)] for gid, cid in self.news_config.items()]
             if rows_config: ws_config.append_rows(rows_config)
-            print("✅ Sheets保存完了")
+            print("✅ Sheets同期完了")
         except Exception as e: print(f"❌ 書き込み失敗: {e}")
 
     def load_from_sheets(self):
@@ -70,7 +69,7 @@ class AtCoderBot(discord.Client):
             ws_user = self.sheet.worksheet("users")
             for r in ws_user.get_all_records():
                 key = f"{r['GuildID']}_{r['AtCoderID']}"
-                self.user_data[key] = {"guild_id": int(r['GuildID']), "atcoder_id": r['AtCoderID'], "discord_user_id": int(r['DiscordID']), "channel_id": int(r['ChannelID']), "only_ac": str(r['OnlyAC']).lower() == 'true'}
+                self.user_data[key] = {"guild_id": int(r['GuildID']), "atcoder_id": r['AtCoderID'], "discord_user_id": int(r['DiscordID']), "channel_id": int(r['ChannelID']), "only_ac": str(r['OnlyAC']).lower() == 'true', "last_sub_id": int(r.get('LastSubID', 0))}
             ws_config = self.sheet.worksheet("config")
             for r in ws_config.get_all_records(): self.news_config[str(r['GuildID'])] = int(r['ChannelID'])
             print("✅ 復元完了")
@@ -89,31 +88,84 @@ class AtCoderBot(discord.Client):
         self.auto_contest_scheduler.start()
         await self.tree.sync()
 
-    # --- Webスクレイピング（詳細取得用） ---
-    async def fetch_contest_details(self, session, url):
-        details = {"writer": "不明", "tester": "不明", "points": "不明"}
-        try:
-            async with session.get(url + "?lang=ja") as resp:
-                soup = BeautifulSoup(await resp.text(), 'html.parser')
-                text = soup.get_text()
-                w_match = re.search(r"Writer[:：]\s*(.*)", text)
-                if w_match: details["writer"] = w_match.group(1).split('\n')[0].strip()
-                t_match = re.search(r"Tester[:：]\s*(.*)", text)
-                if t_match: details["tester"] = t_match.group(1).split('\n')[0].strip()
-                p_tag = soup.find(string=re.compile("配点|Score"))
-                if p_tag:
-                    parent = p_tag.find_parent(["section", "div", "h3"])
-                    if parent: details["points"] = parent.get_text(separator=" ", strip=True).replace("配点", "").replace("Score", "").strip()
-        except: pass
-        return details
+    # --- 提出監視 ---
+    @tasks.loop(minutes=3)
+    async def check_submissions(self):
+        async with aiohttp.ClientSession() as session:
+            for key, info in list(self.user_data.items()):
+                await self.process_submissions(session, info, lookback_seconds=600)
 
-    # --- 自動スケジュール (AGC/ARC/ABC/Xmas対応) ---
+    async def process_submissions(self, session, info, lookback_seconds):
+        atcoder_id = info['atcoder_id']
+        last_id = info.get('last_sub_id', 0)
+        url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={atcoder_id}&from_second={int(datetime.now().timestamp() - lookback_seconds)}"
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                subs = await resp.json()
+                new_last_id = last_id
+                for sub in sorted(subs, key=lambda x: x['id']):
+                    if sub['id'] <= last_id: continue
+                    if info.get('only_ac', True) and sub['result'] != 'AC': continue
+                    await self.send_ac_notification(info, sub)
+                    new_last_id = max(new_last_id, sub['id'])
+                if new_last_id > last_id:
+                    self.user_data[f"{info['guild_id']}_{atcoder_id}"]['last_sub_id'] = new_last_id
+                    self.save_to_sheets()
+
+    async def send_ac_notification(self, info, sub):
+        channel = self.get_channel(info['channel_id'])
+        if not channel: return
+        prob_id, atcoder_id = sub['problem_id'], info['atcoder_id']
+        prob_title = self.problems_map.get(prob_id, prob_id)
+        difficulty = self.diff_map.get(prob_id, {}).get('difficulty')
+        
+        def get_color(d):
+            if d is None: return 0x808080
+            colors = [(400, 0x808080), (800, 0x804000), (1200, 0x008000), (1600, 0x00C0C0), (2000, 0x0000FF), (2400, 0xFFFF00), (2800, 0xFF8000)]
+            for limit, color in colors:
+                if d < limit: return color
+            return 0xFF0000
+
+        desc = (f"**[{prob_title}](https://atcoder.jp/contests/{sub['contest_id']}/tasks/{prob_id})**\n\n"
+                f"user : [{atcoder_id}](https://atcoder.jp/users/{atcoder_id}) / result : **[{sub['result']}]**\n"
+                f"difficulty : {difficulty if difficulty is not None else '---'} / {sub.get('execution_time', '---')}ms / score : {int(sub['point'])} / language : {sub['language']}\n"
+                f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})")
+        
+        embed = discord.Embed(description=desc, color=get_color(difficulty))
+        dt = datetime.fromtimestamp(sub['epoch_second'], JST)
+        embed.set_footer(text=f"提出時間 : {dt.strftime('%Y年%m月%d日(%a)')}")
+        await channel.send(embed=embed)
+
+    # --- 告知スクレイピング (強化版) ---
+    async def fetch_recent_announcements(self, session):
+        results = {}
+        try:
+            async with session.get("https://atcoder.jp/home?lang=ja") as resp:
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
+                for box in soup.select('div.col-md-9 div'):
+                    h4 = box.find('h4')
+                    if h4 and h4.find('a') and '/contests/' in h4.find('a')['href']:
+                        c_url = "https://atcoder.jp" + h4.find('a')['href']
+                        text = box.get_text()
+                        
+                        writer, tester, points = "不明", "不明", "不明"
+                        w_match = re.search(r"Writer[:：]\s*(.*)", text) or re.search(r"作問[:：]\s*(.*)", text)
+                        if w_match: writer = w_match.group(1).split('\n')[0].strip()
+                        t_match = re.search(r"Tester[:：]\s*(.*)", text)
+                        if t_match: tester = t_match.group(1).split('\n')[0].strip()
+                        p_match = re.search(r"(?:配点|Score)[:：]?\s*([0-9\-\s/]+)|配点は\s*([0-9\-\s/]+)\s*です", text)
+                        if p_match: points = (p_match.group(1) or p_match.group(2)).strip()
+
+                        results[c_url] = {"writer": writer, "tester": tester, "points": points}
+        except: pass
+        return results
+
     @tasks.loop(minutes=1)
     async def auto_contest_scheduler(self):
         now = datetime.now(JST)
         async with aiohttp.ClientSession() as session:
+            recent_details = await self.fetch_recent_announcements(session)
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
-                if resp.status != 200: return
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
                 table = soup.find('div', id='contest-table-upcoming')
                 if not table: return
@@ -123,143 +175,70 @@ class AtCoderBot(discord.Client):
                     name_tag = cols[1].find('a')
                     c_name, c_url = name_tag.text, "https://atcoder.jp" + name_tag['href']
                     duration, rated = cols[2].text.strip(), cols[3].text.strip()
+                    details = recent_details.get(c_url, {"writer": "不明", "tester": "不明", "points": "不明"})
 
-                    # 24時間前告知
                     if timedelta(hours=23, minutes=59) < (st_dt - now) <= timedelta(hours=24):
-                        await self.broadcast_contest(session, c_name, c_url, st_dt, duration, rated, "⏰ 24時間前告知")
-                    # 30分前告知 (ユーザー指定フォーマット)
+                        await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 24時間前告知", details)
                     if timedelta(minutes=29) < (st_dt - now) <= timedelta(minutes=30):
-                        await self.broadcast_contest(session, c_name, c_url, st_dt, duration, rated, "⚠️ コンテスト30分前", is_30min=True)
-                    # 開始
+                        await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⚠️ コンテスト30分前", details, is_30min=True)
                     if timedelta(seconds=0) <= (now - st_dt) < timedelta(minutes=1):
-                        await self.broadcast_contest(session, c_name, c_url, st_dt, duration, rated, "🚀 コンテスト開始！", is_start=True)
-                    # 終了
+                        await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🚀 コンテスト開始！", details, is_start=True)
                     try:
                         h, m = map(int, duration.split(':'))
                         if timedelta(seconds=0) <= (now - (st_dt + timedelta(hours=h, minutes=m))) < timedelta(minutes=1):
-                            await self.broadcast_contest(session, c_name, c_url, st_dt, duration, rated, "🏁 コンテスト終了！", is_end=True)
+                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🏁 コンテスト終了！", details, is_end=True)
                     except: pass
 
-    async def broadcast_contest(self, session, name, url, st, dur, rated, label, is_30min=False, is_start=False, is_end=False):
-        task_key = f"{label}_{url}"
-        if task_key in self.sent_notifications: return
-        self.sent_notifications.add(task_key)
-        
-        details = await self.fetch_contest_details(session, url)
-        color = get_rated_color(rated)
-        embed = discord.Embed(title=name, url=url, color=color)
-
+    async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_30min=False, is_start=False, is_end=False):
+        if f"{label}_{url}" in self.sent_notifications: return
+        self.sent_notifications.add(f"{label}_{url}")
+        embed = discord.Embed(title=name, url=url, color=get_rated_color(rated))
         if is_30min:
-            embed.description = (f"コンテストまで残り30分となりました\n\nコンテスト名：[{name}]({url})\n"
-                                 f"👉 [参加登録する]({url})\nレーティング変化： {rated}\n配点： {details['points']}")
+            embed.description = f"コンテストまで残り30分となりました\n\nコンテスト名：[{name}]({url})\n👉 [参加登録する]({url})\nレーティング変化： {rated}\n配点： {details['points']}"
         elif is_start:
-            embed.description = (f"🚀 **開始時刻となりました！**\n"
-                                 f"終了まで： <t:{int((st + timedelta(minutes=int(dur.split(':')[0])*60 + int(dur.split(':')[1]))).timestamp())}:R>\n\n"
-                                 f"**【配点内訳】**\n{details['points']}\n\n"
-                                 f"📈 [順位表]({url}/standings) | 📝 [自分の提出]({url}/submissions/me)")
-        elif is_end:
-            embed.description = "🏁 終了時刻となりました。お疲れ様でした！"
+            embed.description = f"🚀 **開始時刻となりました！**\n終了まで： <t:{int((st + timedelta(minutes=int(dur.split(':')[0])*60 + int(dur.split(':')[1]))).timestamp())}:R>\n\n**【配点内訳】**\n{details['points']}\n\n📈 [順位表]({url}/standings) | 📝 [自分の提出]({url}/submissions/me)"
+        elif is_end: embed.description = "🏁 終了時刻となりました。お疲れ様でした！"
         else:
-            embed.description = (f"コンテストページ： {url}\n開始時刻： {st.strftime('%Y-%m-%d %H:%M')}\n"
-                                 f"コンテスト時間： {dur} 分\nWriter： {details['writer']}\nTester： {details['tester']}\n"
-                                 f"レーティング変化： {rated}\n配点： {details['points']}\n"
-                                 f"コンテスト開始まで： <t:{int(st.timestamp())}:R>")
+            embed.description = f"コンテストページ： {url}\n開始時刻： {st.strftime('%Y-%m-%d %H:%M')}\nコンテスト時間： {dur} 分\nWriter： {details['writer']}\nTester： {details['tester']}\nレーティング変化： {rated}\n配点： {details['points']}\nコンテスト開始まで： <t:{int(st.timestamp())}:R>"
             embed.set_footer(text=f"コンテスト時間：{st.strftime('%Y年%m月%d日 %p %I:%M:%S').replace('AM','午前').replace('PM','午後')}")
-
-        for gid, cid in self.news_config.items():
+        for cid in self.news_config.values():
             channel = self.get_channel(cid)
             if channel: await channel.send(content=f"**{label}**", embed=embed)
 
-    # --- 提出監視 & 遡り機能 ---
-    @tasks.loop(minutes=3)
-    async def check_submissions(self):
-        async with aiohttp.ClientSession() as session:
-            for key, info in list(self.user_data.items()):
-                await self.process_submissions(session, info, lookback_seconds=600)
-
-    async def process_submissions(self, session, info, lookback_seconds):
-        atcoder_id = info['atcoder_id']
-        url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={atcoder_id}&from_second={int(datetime.now().timestamp() - lookback_seconds)}"
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                for sub in await resp.json():
-                    if info.get('only_ac', True) and sub['result'] != 'AC': continue
-                    sub_key = f"{info['guild_id']}_{atcoder_id}_{sub['id']}"
-                    if sub_key not in self.last_sub_ids:
-                        self.last_sub_ids.add(sub_key)
-                        await self.send_ac_notification(info, sub)
-
-    async def send_ac_notification(self, info, sub):
-        channel = self.get_channel(info['channel_id'])
-        if not channel: return
-        prob_title = self.problems_map.get(sub['problem_id'], sub['problem_id'])
-        embed = discord.Embed(description=f"**[{prob_title}](https://atcoder.jp/contests/{sub['contest_id']}/tasks/{sub['problem_id']})** | **[{sub['result']}]**", color=0x00FF00)
-        embed.set_author(name=info['atcoder_id'])
-        await channel.send(embed=embed)
-
 bot = AtCoderBot()
 
-# --- 手動コマンド (すべて復活) ---
-
-@bot.tree.command(name="register", description="通知設定を登録 (過去24時間分を遡って通知します)")
+# --- コマンド一覧 ---
+@bot.tree.command(name="register", description="提出通知の登録")
 async def register(interaction: discord.Interaction, discord_user: discord.Member, atcoder_id: str, channel: discord.TextChannel, only_ac: bool):
     await interaction.response.defer()
-    info = {"guild_id": interaction.guild_id, "discord_user_id": discord_user.id, "atcoder_id": atcoder_id, "channel_id": channel.id, "only_ac": only_ac}
+    info = {"guild_id": interaction.guild_id, "discord_user_id": discord_user.id, "atcoder_id": atcoder_id, "channel_id": channel.id, "only_ac": only_ac, "last_sub_id": 0}
     bot.user_data[f"{interaction.guild_id}_{atcoder_id}"] = info
-    bot.save_to_sheets()
-    await interaction.followup.send(f"✅ `{atcoder_id}` 登録完了。過去24時間の提出を確認します...")
-    async with aiohttp.ClientSession() as session:
-        await bot.process_submissions(session, info, lookback_seconds=86400)
+    bot.save_to_sheets(); await interaction.followup.send(f"✅ `{atcoder_id}` 登録完了。")
+    async with aiohttp.ClientSession() as session: await bot.process_submissions(session, info, lookback_seconds=86400)
 
-@bot.tree.command(name="delete", description="登録解除")
+@bot.tree.command(name="delete", description="提出通知の削除")
 async def delete(interaction: discord.Interaction, atcoder_id: str):
     await interaction.response.defer()
     key = f"{interaction.guild_id}_{atcoder_id}"
     if key in bot.user_data:
-        del bot.user_data[key]
-        bot.save_to_sheets(); await interaction.followup.send(f"🗑️ `{atcoder_id}` 解除完了")
-    else: await interaction.followup.send("登録なし", ephemeral=True)
+        del bot.user_data[key]; bot.save_to_sheets()
+        await interaction.followup.send(f"🗑️ `{atcoder_id}` の通知設定を削除しました。")
+    else: await interaction.followup.send("登録が見つかりませんでした。", ephemeral=True)
 
-@bot.tree.command(name="notice_set", description="告知先チャンネル設定")
+@bot.tree.command(name="notice_set", description="コンテスト告知チャンネルの設定")
 async def notice_set(interaction: discord.Interaction, channel: discord.TextChannel):
     await interaction.response.defer()
     bot.news_config[str(interaction.guild_id)] = channel.id
-    bot.save_to_sheets(); await interaction.followup.send(f"✅ 告知先を {channel.mention} に設定")
+    bot.save_to_sheets(); await interaction.followup.send(f"✅ 告知先を {channel.mention} に設定しました。")
 
-@bot.tree.command(name="info", description="今後の予定を表示")
-async def info(interaction: discord.Interaction):
+@bot.tree.command(name="notice_delete", description="コンテスト告知設定の削除")
+async def notice_delete(interaction: discord.Interaction):
     await interaction.response.defer()
-    async with aiohttp.ClientSession() as session:
-        async with session.get("https://atcoder.jp/home?lang=ja") as resp:
-            soup = BeautifulSoup(await resp.text(), 'html.parser')
-            embeds = []
-            table = soup.find('div', id='contest-table-upcoming')
-            if table:
-                for row in table.find_all('tr')[1:4]:
-                    cols = row.find_all('td')
-                    name_tag = cols[1].find('a')
-                    embeds.append(discord.Embed(title=name_tag.text, url="https://atcoder.jp"+name_tag['href']).add_field(name="開始", value=cols[0].text))
-            await interaction.followup.send(embeds=embeds if embeds else "予定なし")
-
-@bot.tree.command(name="test_abc441", description="ABC441の通知テスト (30分前、開始時、終了時を送信)")
-async def test_abc441(interaction: discord.Interaction):
-    await interaction.response.defer()
-    url = "https://atcoder.jp/contests/abc441"
-    start_dt = datetime.now(JST) + timedelta(seconds=10)
-    # 30分前テスト
-    e_30 = discord.Embed(title="ABC441 (テスト)", url=url, color=0x0000FF)
-    e_30.description = f"コンテストまで残り30分となりました\n\nコンテスト名：[ABC441]\n👉 [参加登録する]({url})\nレーティング変化： ~ 1999\n配点： 100-200-300-400-450-500-575"
-    # 開始テスト
-    e_st = discord.Embed(title="ABC441 (テスト)", url=url, color=0xFF0000)
-    e_st.description = f"🚀 **開始時刻となりました！**\n終了まで： 100分後\n\n**【配点内訳】**\nA 100点 B 200点 C 300点 D 400点 E 450点 F 500点 G 575点\n\n📈 [順位表]({url}/standings) | 📝 [自分の提出]({url}/submissions/me)"
-    # 終了テスト
-    e_ed = discord.Embed(title="ABC441 (テスト)", url=url, color=0x808080, description="🏁 終了時刻となりました。お疲れ様でした！")
-    
-    await interaction.followup.send("🧪 テスト通知一式を送信します:")
-    await interaction.channel.send(embed=e_30)
-    await interaction.channel.send(embed=e_st)
-    await interaction.channel.send(embed=e_ed)
+    gid = str(interaction.guild_id)
+    if gid in bot.news_config:
+        del bot.news_config[gid]; bot.save_to_sheets()
+        await interaction.followup.send("🗑️ コンテスト告知の設定を削除しました。")
+    else: await interaction.followup.send("設定が見つかりませんでした。", ephemeral=True)
 
 if __name__ == "__main__":
-    keep_alive()
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    keep_alive(); bot.run(os.getenv("DISCORD_TOKEN"))
