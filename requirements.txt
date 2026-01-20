@@ -2,3 +2,4 @@ discord.py
 flask
 requests
 aiohttp
+beautifulsoup4
