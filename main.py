@@ -21,12 +21,12 @@ SHEET_NAME = "AtCoderBot_DB"
 
 # あなたが作成したカスタム絵文字ID
 EMOJI_MAP = {
-    "AC": "<:atcoder_bot_AC:1463062313970962486>",
-    "WA": "<:atcoder_bot_WA:1463062282442510417>",
-    "TLE": "<:atcoder_bot_TLE:1463062213018517516>",
-    "RE": "<:atcoder_bot_RE:1463062247247974440>",
-    "CE": "<:atcoder_bot_CE:1463061962932879393>",
-    "MLE": "<:atcoder_bot_MLE:1463062164708261981>"
+    "AC": "<:atcoder_bot_AC:1463065663429021917>",
+    "WA": "<:atcoder_bot_WA:1463065707703959643>",
+    "TLE": "<:atcoder_bot_TLE:1463065790256382086>",
+    "RE": "<:atcoder_bot_RE:1463065747705172165>",
+    "CE": "<:atcoder_bot_CE:1463065865561051228>",
+    "MLE": "<:atcoder_bot_MLE:1463065831763349514>"
 }
 
 def get_rated_color(rating_str):
