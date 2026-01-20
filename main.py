@@ -145,21 +145,24 @@ class AtCoderBot(discord.Client):
                 if d < limit: return color
             return 0xFF0000
 
-        # Embed作成
-        embed = discord.Embed(color=get_color(difficulty))
+        # --- ここでタイトル（題名）とリンクを設定 ---
+        embed = discord.Embed(
+            title=prob_title,
+            url=f"https://atcoder.jp/contests/{sub['contest_id']}/tasks/{prob_id}",
+            color=get_color(difficulty)
+        )
         
-        # ヘッダー：アイコンとDiscordユーザー名のみ
+        # ヘッダー：アイコンとDiscordユーザー名
         embed.set_author(
             name=f"{user_name}",
             icon_url=user_icon
         )
 
-        # 本文：問題名(リンク)、user & result、詳細スペック
+        # 本文：user & result、詳細スペック
         desc = (
-            f"**[{prob_title}](https://atcoder.jp/contests/{sub['contest_id']}/tasks/{prob_id})**\n"
             f"user : [{atcoder_id}](https://atcoder.jp/users/{atcoder_id}) / result : {emoji} **[{res}]**\n"
             f"difficulty : {difficulty if difficulty is not None else '---'} / {sub.get('execution_time', '---')}ms / score : {int(sub['point'])}\n"
-            f"language : {sub['language']}\n"
+            f"language : {sub['language']}\n\n"
             f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})"
         )
         
@@ -170,34 +173,6 @@ class AtCoderBot(discord.Client):
         embed.set_footer(text=f"提出時間 : {dt.strftime('%Y年%m月%d日(%a) %H:%M:%S')}")
         
         await channel.send(embed=embed)
-
-        # Embed作成
-        embed = discord.Embed(color=get_color(difficulty))
-        
-        # 2. ヘッダー（アイコン、名前）
-        embed.set_author(
-            name=f"{user_name} ・ {atcoder_id}",
-            icon_url=user_icon
-        )
-
-        # 3. 本文（問題名・判定・詳細）
-        # 太字や改行位置をご要望通りに設定
-        desc = (
-            f"**{prob_title}**\n\n"
-            f"result : {emoji} **[{res}]**\n"
-            f"difficulty : {difficulty if difficulty is not None else '---'} / {sub.get('execution_time', '---')}ms / score : {int(sub['point'])}\n"
-            f"language : {sub['language']}\n\n"
-            f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})"
-        )
-        
-        embed.description = desc
-        
-        # 4. フッター（時刻）
-        dt = datetime.fromtimestamp(sub['epoch_second'], JST)
-        embed.set_footer(text=f"提出時間 : {dt.strftime('%Y年%m月%d日(%a) %H:%M:%S')}")
-        
-        await channel.send(embed=embed)
-    
     # --- 告知スクレイピング ---
     async def fetch_recent_announcements(self, session):
         results = {}
