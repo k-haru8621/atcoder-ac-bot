@@ -8,7 +8,7 @@ from flask import Flask
 from threading import Thread
 from bs4 import BeautifulSoup
 
-# --- Flask Server (Keep Alive) ---
+# --- Flask Server ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is running!"
@@ -18,6 +18,16 @@ def keep_alive(): Thread(target=run).start()
 # --- 設定 ---
 JST = timezone(timedelta(hours=9))
 SHEET_NAME = "AtCoderBot_DB"
+
+# あなたが作成したカスタム絵文字ID
+EMOJI_MAP = {
+    "AC": "<:atcoder_bot_AC:1463062313970962486>",
+    "WA": "<:atcoder_bot_WA:1463062282442510417>",
+    "TLE": "<:atcoder_bot_TLE:1463062213018517516>",
+    "RE": "<:atcoder_bot_RE:1463062247247974440>",
+    "CE": "<:atcoder_bot_CE:1463061962932879393>",
+    "MLE": "<:atcoder_bot_MLE:1463062164708261981>"
+}
 
 def get_rated_color(rating_str):
     if "All" in rating_str: return 0xFF0000 
@@ -112,12 +122,16 @@ class AtCoderBot(discord.Client):
                     self.user_data[f"{info['guild_id']}_{atcoder_id}"]['last_sub_id'] = new_last_id
                     self.save_to_sheets()
 
+    # --- 提出通知 (絵文字・秒単位・インデント修正済) ---
     async def send_ac_notification(self, info, sub):
         channel = self.get_channel(info['channel_id'])
         if not channel: return
         prob_id, atcoder_id = sub['problem_id'], info['atcoder_id']
         prob_title = self.problems_map.get(prob_id, prob_id)
         difficulty = self.diff_map.get(prob_id, {}).get('difficulty')
+        
+        res = sub['result']
+        emoji = EMOJI_MAP.get(res, "❓")
         
         def get_color(d):
             if d is None: return 0x808080
@@ -127,7 +141,7 @@ class AtCoderBot(discord.Client):
             return 0xFF0000
 
         desc = (f"**[{prob_title}](https://atcoder.jp/contests/{sub['contest_id']}/tasks/{prob_id})**\n\n"
-                f"user : [{atcoder_id}](https://atcoder.jp/users/{atcoder_id}) / result : **[{sub['result']}]**\n"
+                f"user : [{atcoder_id}](https://atcoder.jp/users/{atcoder_id}) / result : {emoji} **[{res}]**\n"
                 f"difficulty : {difficulty if difficulty is not None else '---'} / {sub.get('execution_time', '---')}ms / score : {int(sub['point'])} / language : {sub['language']}\n"
                 f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})")
         
@@ -136,7 +150,7 @@ class AtCoderBot(discord.Client):
         embed.set_footer(text=f"提出時間 : {dt.strftime('%Y年%m月%d日(%a) %H:%M:%S')}")
         await channel.send(embed=embed)
 
-    # --- 告知スクレイピング (強化版) ---
+    # --- 告知スクレイピング ---
     async def fetch_recent_announcements(self, session):
         results = {}
         try:
@@ -147,7 +161,6 @@ class AtCoderBot(discord.Client):
                     if h4 and h4.find('a') and '/contests/' in h4.find('a')['href']:
                         c_url = "https://atcoder.jp" + h4.find('a')['href']
                         text = box.get_text()
-                        
                         writer, tester, points = "不明", "不明", "不明"
                         w_match = re.search(r"Writer[:：]\s*(.*)", text) or re.search(r"作問[:：]\s*(.*)", text)
                         if w_match: writer = w_match.group(1).split('\n')[0].strip()
@@ -155,39 +168,43 @@ class AtCoderBot(discord.Client):
                         if t_match: tester = t_match.group(1).split('\n')[0].strip()
                         p_match = re.search(r"(?:配点|Score)[:：]?\s*([0-9\-\s/]+)|配点は\s*([0-9\-\s/]+)\s*です", text)
                         if p_match: points = (p_match.group(1) or p_match.group(2)).strip()
-
                         results[c_url] = {"writer": writer, "tester": tester, "points": points}
         except: pass
         return results
 
+    # --- コンテストスケジュール (IndexError対策済) ---
     @tasks.loop(minutes=1)
     async def auto_contest_scheduler(self):
         now = datetime.now(JST)
         async with aiohttp.ClientSession() as session:
             recent_details = await self.fetch_recent_announcements(session)
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
+                if resp.status != 200: return
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
                 table = soup.find('div', id='contest-table-upcoming')
                 if not table: return
                 for row in table.find_all('tr')[1:]:
                     cols = row.find_all('td')
-                    st_dt = datetime.strptime(cols[0].text.strip(), '%Y-%m-%d %H:%M:%S%z')
-                    name_tag = cols[1].find('a')
-                    c_name, c_url = name_tag.text, "https://atcoder.jp" + name_tag['href']
-                    duration, rated = cols[2].text.strip(), cols[3].text.strip()
-                    details = recent_details.get(c_url, {"writer": "不明", "tester": "不明", "points": "不明"})
-
-                    if timedelta(hours=23, minutes=59) < (st_dt - now) <= timedelta(hours=24):
-                        await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 24時間前告知", details)
-                    if timedelta(minutes=29) < (st_dt - now) <= timedelta(minutes=30):
-                        await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⚠️ コンテスト30分前", details, is_30min=True)
-                    if timedelta(seconds=0) <= (now - st_dt) < timedelta(minutes=1):
-                        await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🚀 コンテスト開始！", details, is_start=True)
+                    if len(cols) < 4: continue 
                     try:
-                        h, m = map(int, duration.split(':'))
-                        if timedelta(seconds=0) <= (now - (st_dt + timedelta(hours=h, minutes=m))) < timedelta(minutes=1):
-                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🏁 コンテスト終了！", details, is_end=True)
-                    except: pass
+                        st_dt = datetime.strptime(cols[0].text.strip(), '%Y-%m-%d %H:%M:%S%z')
+                        name_tag = cols[1].find('a')
+                        if not name_tag: continue
+                        c_name, c_url = name_tag.text, "https://atcoder.jp" + name_tag['href']
+                        duration, rated = cols[2].text.strip(), cols[3].text.strip()
+                        details = recent_details.get(c_url, {"writer": "不明", "tester": "不明", "points": "不明"})
+
+                        if timedelta(hours=23, minutes=59) < (st_dt - now) <= timedelta(hours=24):
+                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 24時間前告知", details)
+                        if timedelta(minutes=29) < (st_dt - now) <= timedelta(minutes=30):
+                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⚠️ コンテスト30分前", details, is_30min=True)
+                        if timedelta(seconds=0) <= (now - st_dt) < timedelta(minutes=1):
+                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🚀 コンテスト開始！", details, is_start=True)
+                        if ":" in duration:
+                            h, m = map(int, duration.split(':'))
+                            if timedelta(seconds=0) <= (now - (st_dt + timedelta(hours=h, minutes=m))) < timedelta(minutes=1):
+                                await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🏁 コンテスト終了！", details, is_end=True)
+                    except: continue
 
     async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_30min=False, is_start=False, is_end=False):
         if f"{label}_{url}" in self.sent_notifications: return
