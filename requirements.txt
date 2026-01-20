@@ -3,3 +3,5 @@ flask
 requests
 aiohttp
 beautifulsoup4
+gspread
+oauth2client
