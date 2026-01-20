@@ -133,7 +133,7 @@ class AtCoderBot(discord.Client):
         
         embed = discord.Embed(description=desc, color=get_color(difficulty))
         dt = datetime.fromtimestamp(sub['epoch_second'], JST)
-        embed.set_footer(text=f"提出時間 : {dt.strftime('%Y年%m月%d日(%a)')}")
+        embed.set_footer(text=f"提出時間 : {dt.strftime('%Y年%m月%d日(%a) %H:%M:%S')}")
         await channel.send(embed=embed)
 
     # --- 告知スクレイピング (強化版) ---
