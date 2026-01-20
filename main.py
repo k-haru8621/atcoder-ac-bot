@@ -67,11 +67,10 @@ class AtCoderBot(discord.Client):
                     if r.status == 200:
                         self.diff_map = await r.json()
         except: print("API resources load failed.")
-        
         self.check_submissions.start()
         await self.tree.sync()
 
-    # --- AC通知ロジック ---
+    # --- AC通知ロジック (省略なし) ---
     @tasks.loop(minutes=3)
     async def check_submissions(self):
         async with aiohttp.ClientSession() as session:
@@ -180,34 +179,62 @@ async def info(interaction: discord.Interaction):
             
             await interaction.followup.send(embeds=embeds)
 
-@bot.tree.command(name="test_abc441", description="ABC441の通知テスト（何度でも実行可能）")
+# --- 修正版テスト用コマンド ---
+@bot.tree.command(name="test_abc441", description="ABC441の通知テスト（不足情報をすべて復活）")
 async def test_abc441(interaction: discord.Interaction):
     await interaction.response.defer()
     
     contest_id = "abc441"
+    full_name = "AtCoder Beginner Contest 441 (Promotion of Engineer Guild Fes)"
     short_name = "AtCoder Beginner Contest 441"
     contest_url = f"https://atcoder.jp/contests/{contest_id}"
     start_dt = datetime.now(JST) + timedelta(seconds=15)
+    duration = 100
     pts_str = "100-200-300-400-450-500-575"
     rating = "~ 1999"
     color = get_rated_color(rating)
     
-    # 告知
-    e1 = discord.Embed(title=short_name + " (Test Edition)", url=contest_url, color=color)
-    e1.description = f"開始まで： <t:{int(start_dt.timestamp())}:R>\n配点： {pts_str}"
-    
-    # 開始
-    end_dt = start_dt + timedelta(minutes=100)
+    # 1. 告知 Embed (復活・修正版)
+    unix_start = int(start_dt.timestamp())
+    e1 = discord.Embed(title=full_name, url=contest_url, color=color)
+    e1.description = (
+        f"コンテストページ： {contest_url}\n"
+        f"開始時刻： {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
+        f"コンテスト時間： {duration} 分\n"
+        f"Writer： mechanicalpenciI, MMNMM, ynymxiaolongbao, evima\n"
+        f"Tester： Nyaan, physics0523\n"
+        f"レーティング変化： {rating}\n"
+        f"配点： {pts_str}\n"
+        f"コンテスト開始まで： <t:{unix_start}:R>"
+    )
+    # フッターの開始時刻を 午前/午後 表記に
+    time_footer = start_dt.strftime('%Y年%m月%d日 %p %I:%M:%S').replace('AM','午前').replace('PM','午後')
+    e1.set_footer(text=f"コンテスト時間：{time_footer}")
+
+    # 2. 開始 Embed (合計点復活版)
+    end_dt = start_dt + timedelta(minutes=duration)
+    unix_end = int(end_dt.timestamp())
     pts = pts_str.split('-')
     labels = ["A","B","C","D","E","F","G"]
-    pt_txt = "".join([f"**{labels[i]}** {pts[i]}点 " + ("\n" if (i+1)%4==0 else "") for i in range(len(pts))])
+    pt_txt = ""
+    total = 0
+    for i, p in enumerate(pts):
+        pt_txt += f"**{labels[i]}** {p}点　"
+        total += int(p)
+        if (i+1) % 4 == 0: pt_txt += "\n"
+    
     e2 = discord.Embed(title=short_name, url=contest_url, color=color)
-    e2.description = f"🚀 **開始時刻となりました！**\n終了まで： <t:{int(end_dt.timestamp())}:R>\n\n**【配点内訳】**\n{pt_txt}\n\n📈 [順位表]({contest_url}/standings) | 📝 [自分の提出]({contest_url}/submissions/me)"
+    e2.description = (
+        f"🚀 **開始時刻となりました！**\n終了まで： <t:{unix_end}:R>\n\n"
+        f"**【配点内訳】**\n{pt_txt}\n**合計　{total}点**\n\n"
+        f"📈 [順位表]({contest_url}/standings) | 📝 [自分の提出]({contest_url}/submissions/me)"
+    )
 
-    # 終了
-    e3 = discord.Embed(title=short_name, url=contest_url, color=color, description="🏁 **終了時刻となりました。お疲れ様でした！**")
+    # 3. 終了 Embed (シンプル版に修正)
+    e3 = discord.Embed(title=short_name, url=contest_url, color=color)
+    e3.description = f"🏁 終了時刻となりました。お疲れ様でした！"
 
-    await interaction.followup.send("🧪 テスト送信一式:")
+    await interaction.followup.send("🧪 テスト送信一式（修正済み）:")
     await interaction.channel.send(embed=e1)
     await interaction.channel.send(embed=e2)
     await interaction.channel.send(embed=e3)
