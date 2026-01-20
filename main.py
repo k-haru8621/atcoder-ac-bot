@@ -103,7 +103,7 @@ class AtCoderBot(discord.Client):
     async def check_submissions(self):
         async with aiohttp.ClientSession() as session:
             for key, info in list(self.user_data.items()):
-                await self.process_submissions(session, info, lookback_seconds=600)
+                await self.process_submissions(session, info, lookback_seconds=259200)
 
     async def process_submissions(self, session, info, lookback_seconds):
         atcoder_id = info['atcoder_id']
