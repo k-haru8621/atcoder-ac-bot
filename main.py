@@ -48,6 +48,7 @@ class AtCoderBot(discord.Client):
         
         try:
             scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            # Secret Files の credentials.json を使用
             creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
             self.gc = gspread.authorize(creds)
             self.sheet = self.gc.open(SHEET_NAME)
@@ -57,12 +58,14 @@ class AtCoderBot(discord.Client):
     # --- DB保存・復元 ---
     def save_to_sheets(self):
         try:
+            # usersシート
             ws_user = self.sheet.worksheet("users")
             ws_user.clear()
             ws_user.append_row(["GuildID", "AtCoderID", "DiscordID", "ChannelID", "OnlyAC"])
             rows = [[str(v['guild_id']), v['atcoder_id'], str(v['discord_user_id']), str(v['channel_id']), str(v['only_ac'])] for v in self.user_data.values()]
             if rows: ws_user.append_rows(rows)
 
+            # configシート
             ws_config = self.sheet.worksheet("config")
             ws_config.clear()
             ws_config.append_row(["GuildID", "ChannelID"])
@@ -74,9 +77,14 @@ class AtCoderBot(discord.Client):
     def load_from_sheets(self):
         try:
             ws_user = self.sheet.worksheet("users")
-            for r in ws_user.get_all_records():
+            records = ws_user.get_all_records()
+            for r in records:
                 key = f"{r['GuildID']}_{r['AtCoderID']}"
-                self.user_data[key] = {"guild_id": int(r['GuildID']), "atcoder_id": r['AtCoderID'], "discord_user_id": int(r['DiscordID']), "channel_id": int(r['ChannelID']), "only_ac": str(r['OnlyAC']).lower() == 'true'}
+                self.user_data[key] = {
+                    "guild_id": int(r['GuildID']), "atcoder_id": r['AtCoderID'], 
+                    "discord_user_id": int(r['DiscordID']), "channel_id": int(r['ChannelID']), 
+                    "only_ac": str(r['OnlyAC']).lower() == 'true'
+                }
             ws_config = self.sheet.worksheet("config")
             for r in ws_config.get_all_records():
                 self.news_config[str(r['GuildID'])] = int(r['ChannelID'])
@@ -105,7 +113,8 @@ class AtCoderBot(discord.Client):
                 url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={atcoder_id}&from_second={from_time}"
                 async with session.get(url) as resp:
                     if resp.status != 200: continue
-                    for sub in await resp.json():
+                    subs = await resp.json()
+                    for sub in subs:
                         if info.get('only_ac', True) and sub['result'] != 'AC': continue
                         sub_key = f"{info['guild_id']}_{atcoder_id}_{sub['id']}"
                         if sub_key in self.last_sub_ids: continue
@@ -117,7 +126,10 @@ class AtCoderBot(discord.Client):
         if not channel: return
         prob_id = sub['problem_id']
         diff = self.diff_map.get(prob_id, {}).get('difficulty', '不明')
-        embed = discord.Embed(description=f"**[{self.problems_map.get(prob_id, prob_id)}](https://atcoder.jp/contests/{sub['contest_id']}/tasks/{prob_id})** | **[{sub['result']}]** | [📄提出](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})", color=self.get_diff_color(diff))
+        embed = discord.Embed(
+            description=f"**[{self.problems_map.get(prob_id, prob_id)}](https://atcoder.jp/contests/{sub['contest_id']}/tasks/{prob_id})** | **[{sub['result']}]** | [📄提出](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})", 
+            color=self.get_diff_color(diff)
+        )
         embed.set_author(name=info['atcoder_id'])
         embed.add_field(name="", value=f"diff：{diff} | 言語：{sub['language']}")
         await channel.send(embed=embed)
@@ -129,37 +141,44 @@ class AtCoderBot(discord.Client):
 
 bot = AtCoderBot()
 
-# --- コマンド群 (全維持) ---
+# --- コマンド群 (タイムアウト対策 defer 追加済み) ---
 
-@bot.tree.command(name="register", description="通知設定を登録・Sheets保存")
+@bot.tree.command(name="register", description="通知設定を登録・保存")
 async def register(interaction: discord.Interaction, discord_user: discord.Member, atcoder_id: str, channel: discord.TextChannel, only_ac: bool):
-    bot.user_data[f"{interaction.guild_id}_{atcoder_id}"] = {"guild_id": interaction.guild_id, "discord_user_id": discord_user.id, "atcoder_id": atcoder_id, "channel_id": channel.id, "only_ac": only_ac}
+    await interaction.response.defer()
+    bot.user_data[f"{interaction.guild_id}_{atcoder_id}"] = {
+        "guild_id": interaction.guild_id, "discord_user_id": discord_user.id, 
+        "atcoder_id": atcoder_id, "channel_id": channel.id, "only_ac": only_ac
+    }
     bot.save_to_sheets()
-    await interaction.response.send_message(f"✅ `{atcoder_id}` を登録しました。")
+    await interaction.followup.send(f"✅ `{atcoder_id}` を登録しました。")
 
 @bot.tree.command(name="delete", description="登録解除")
 async def delete(interaction: discord.Interaction, atcoder_id: str):
+    await interaction.response.defer()
     key = f"{interaction.guild_id}_{atcoder_id}"
     if key in bot.user_data:
         del bot.user_data[key]
         bot.save_to_sheets()
-        await interaction.response.send_message(f"🗑️ `{atcoder_id}` を解除しました。")
-    else: await interaction.response.send_message("登録なし。", ephemeral=True)
+        await interaction.followup.send(f"🗑️ `{atcoder_id}` を解除しました。")
+    else: await interaction.followup.send("登録なし。", ephemeral=True)
 
 @bot.tree.command(name="notice_set", description="定時ニュースの送信先を設定")
 async def notice_set(interaction: discord.Interaction, channel: discord.TextChannel):
+    await interaction.response.defer()
     bot.news_config[str(interaction.guild_id)] = channel.id
     bot.save_to_sheets()
-    await interaction.response.send_message(f"✅ ニュース送信先を {channel.mention} に設定。")
+    await interaction.followup.send(f"✅ ニュース送信先を {channel.mention} に設定。")
 
 @bot.tree.command(name="notice_delete", description="定時ニュースの設定を解除")
 async def notice_delete(interaction: discord.Interaction):
-    guild_id = str(interaction.guild_id)
-    if guild_id in bot.news_config:
-        del bot.news_config[guild_id]
+    await interaction.response.defer()
+    gid = str(interaction.guild_id)
+    if gid in bot.news_config:
+        del bot.news_config[gid]
         bot.save_to_sheets()
-        await interaction.response.send_message("🗑️ ニュース設定解除。")
-    else: await interaction.response.send_message("設定なし。", ephemeral=True)
+        await interaction.followup.send("🗑️ ニュース設定解除。")
+    else: await interaction.followup.send("設定なし。", ephemeral=True)
 
 @bot.tree.command(name="info", description="手動で情報を取得")
 async def info(interaction: discord.Interaction):
@@ -172,26 +191,54 @@ async def info(interaction: discord.Interaction):
             if table:
                 for row in table.find_all('tr')[1:4]:
                     cols = row.find_all('td')
+                    time_str = cols[0].text
                     name_tag = cols[1].find('a')
-                    embeds.append(discord.Embed(title=name_tag.text, url="https://atcoder.jp"+name_tag['href']).add_field(name="開始", value=cols[0].text))
+                    img = cols[1].find('img')
+                    color = 0x000000
+                    if img:
+                        for c, code in CIRCLE_COLORS.items():
+                            if c in img['src']: color = code; break
+                    embeds.append(discord.Embed(title=name_tag.text, url="https://atcoder.jp"+name_tag['href'], color=color).add_field(name="開始時刻", value=time_str))
+            
+            imp = soup.find('div', id='home-important-notices')
+            if imp:
+                txt = "\n".join([f"• {li.text.strip()}" for li in imp.find_all('li')[:5]])
+                embeds.append(discord.Embed(title="✅ 重要告知", description=txt, color=0x008000))
+            
             await interaction.followup.send(embeds=embeds if embeds else "予定なし")
 
 @bot.tree.command(name="test_abc441", description="ABC441の通知テスト(WATCHING対応)")
 async def test_abc441(interaction: discord.Interaction):
     await interaction.response.defer()
     target_id = next((v['atcoder_id'] for v in bot.user_data.values() if v['guild_id'] == interaction.guild_id and v['discord_user_id'] == interaction.user.id), "chokudai")
-    contest_id, url = "abc441", "https://atcoder.jp/contests/abc441"
-    start_dt = datetime.now(JST) + timedelta(seconds=15)
-    pts_str, rating = "100-200-300-400-450-500-575", "~ 1999"
     
-    e1 = discord.Embed(title="AtCoder Beginner Contest 441 (Promotion of Engineer Guild Fes)", url=url, color=get_rated_color(rating))
-    e1.description = f"コンテストページ： {url}\n開始時刻： {start_dt.strftime('%Y-%m-%d %H:%M')}\nコンテスト時間： 100 分\nWriter： mechanicalpenciI, MMNMM, ynymxiaolongbao, evima\nTester： Nyaan, physics0523\nレーティング変化： {rating}\n配点： {pts_str}\n開始まで： <t:{int(start_dt.timestamp())}:R>"
+    contest_id = "abc441"
+    full_name = "AtCoder Beginner Contest 441 (Promotion of Engineer Guild Fes)"
+    short_name = "AtCoder Beginner Contest 441"
+    url = f"https://atcoder.jp/contests/{contest_id}"
+    start_dt = datetime.now(JST) + timedelta(seconds=15)
+    duration, rating, pts_str = 100, "~ 1999", "100-200-300-400-450-500-575"
+    color = get_rated_color(rating)
+    
+    # 告知
+    e1 = discord.Embed(title=full_name, url=url, color=color)
+    e1.description = (f"コンテストページ： {url}\n開始時刻： {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
+                      f"コンテスト時間： {duration} 分\nWriter： mechanicalpenciI, MMNMM, ynymxiaolongbao, evima\n"
+                      f"Tester： Nyaan, physics0523\nレーティング変化： {rating}\n配点： {pts_str}\n"
+                      f"コンテスト開始まで： <t:{int(start_dt.timestamp())}:R>")
     e1.set_footer(text=f"コンテスト時間：{start_dt.strftime('%Y年%m月%d日 %p %I:%M:%S').replace('AM','午前').replace('PM','午後')}")
 
-    e2 = discord.Embed(title="AtCoder Beginner Contest 441", url=url, color=get_rated_color(rating))
-    e2.description = f"🚀 **開始時刻となりました！**\n終了まで： <t:{int((start_dt + timedelta(minutes=100)).timestamp())}:R>\n\n**【配点内訳】**\n{pts_str}\n**合計　{sum(map(int, pts_str.split('-')))}点**\n\n📈 [順位表（{target_id}）]({url}/standings?watching={target_id}) | 📝 [自分の提出]({url}/submissions/me)"
+    # 開始
+    pts = pts_str.split('-')
+    labels = ["A","B","C","D","E","F","G"]
+    pt_txt = "".join([f"**{labels[i]}** {p}点　" + ("\n" if (i+1)%4==0 else "") for i, p in enumerate(pts)])
+    e2 = discord.Embed(title=short_name, url=url, color=color)
+    e2.description = (f"🚀 **開始時刻となりました！**\n終了まで： <t:{int((start_dt + timedelta(minutes=duration)).timestamp())}:R>\n\n"
+                      f"**【配点内訳】**\n{pt_txt}\n**合計　{sum(map(int, pts))}点**\n\n"
+                      f"📈 [順位表（{target_id}）]({url}/standings?watching={target_id}) | 📝 [自分の提出]({url}/submissions/me)")
     
-    e3 = discord.Embed(title="AtCoder Beginner Contest 441", url=url, color=get_rated_color(rating), description="🏁 終了時刻となりました。お疲れ様でした！")
+    # 終了
+    e3 = discord.Embed(title=short_name, url=url, color=color, description="🏁 終了時刻となりました。お疲れ様でした！")
     
     await interaction.followup.send("🧪 テスト送信一式:")
     for e in [e1, e2, e3]: await interaction.channel.send(embed=e)
