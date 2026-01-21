@@ -159,9 +159,11 @@ class AtCoderBot(discord.Client):
         )
 
         # 本文：user & result、詳細スペック
+        # execution_time が None または存在しない場合に 0 を使うように変更
+        exec_time = sub.get('execution_time') if sub.get('execution_time') is not None else 0
         desc = (
             f"user : [{atcoder_id}](https://atcoder.jp/users/{atcoder_id}) / result : {emoji} **[{res}]**\n"
-            f"difficulty : {difficulty if difficulty is not None else '---'} / {sub.get('execution_time', '---')}ms / score : {int(sub['point'])}\n"
+            f"difficulty : {difficulty if difficulty is not None else '---'} / {exec_time}ms / score : {int(sub['point'])}\n"
             f"language : {sub['language']}\n\n"
             f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})\n"
             f"🔍 [このコンテストの解説を読む](https://atcoder.jp/contests/{sub['contest_id']}/editorial)"
