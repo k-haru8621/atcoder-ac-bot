@@ -170,7 +170,7 @@ class AtCoderBot(discord.Client):
         
         # フッター：時刻
         dt = datetime.fromtimestamp(sub['epoch_second'], JST)
-        embed.set_footer(text=f"Submitted at : {dt.strftime('%b %d, %Y (%a) %H:%M:%S')}")
+        embed.set_footer(text=f"提出時刻 : {dt.strftime('%b %d, %Y (%a) %H:%M:%S')}")
         
         await channel.send(embed=embed)
     # --- 告知スクレイピング ---
