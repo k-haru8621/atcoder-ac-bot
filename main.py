@@ -163,8 +163,10 @@ class AtCoderBot(discord.Client):
             f"user : [{atcoder_id}](https://atcoder.jp/users/{atcoder_id}) / result : {emoji} **[{res}]**\n"
             f"difficulty : {difficulty if difficulty is not None else '---'} / {sub.get('execution_time', '---')}ms / score : {int(sub['point'])}\n"
             f"language : {sub['language']}\n\n"
-            f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})"
+            f"📄 [{atcoder_id}さんの提出を見る](https://atcoder.jp/contests/{sub['contest_id']}/submissions/{sub['id']})\n"
+            f"🔍 [このコンテストの解説を読む](https://atcoder.jp/contests/{sub['contest_id']}/editorial)"
         )
+        
         
         embed.description = desc
         
