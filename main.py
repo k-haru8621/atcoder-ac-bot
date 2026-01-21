@@ -284,5 +284,73 @@ async def notice_delete(interaction: discord.Interaction):
         await interaction.followup.send("🗑️ コンテスト告知の設定を削除しました。")
     else: await interaction.followup.send("設定が見つかりませんでした。", ephemeral=True)
 
+# --- プレビューコマンド ---
+@bot.tree.command(name="preview", description="各種通知の見た目を確認します")
+@app_commands.choices(type=[
+    app_commands.Choice(name="提出通知 (AC)", value="ac"),
+    app_commands.Choice(name="コンテスト告知 (24時間前)", value="c24"),
+    app_commands.Choice(name="コンテスト告知 (30分前)", value="c30"),
+    app_commands.Choice(name="コンテスト告知 (開始)", value="cstart"),
+    app_commands.Choice(name="コンテスト告知 (終了)", value="cend")
+])
+async def preview(interaction: discord.Interaction, type: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    # 共通のダミーデータ
+    dummy_details = {
+        "writer": "AtCoder_Staff",
+        "tester": "Admin_Tester",
+        "points": "100-200-300-400-500-600"
+    }
+    dummy_url = "https://atcoder.jp/contests/practice"
+    dummy_st = datetime.now(JST)
+    
+    # 送信先チャンネル（コマンドを打ったチャンネル）
+    channel_id = interaction.channel_id
+
+    if type == "ac":
+        # AC通知のダミーデータ
+        dummy_sub = {
+            'id': 0, 'problem_id': 'abc999_a', 'contest_id': 'abc999',
+            'user_id': 'AtCoderUser', 'language': 'Python (3.12.1)',
+            'point': 100.0, 'execution_time': 15, 'result': 'AC',
+            'epoch_second': int(datetime.now().timestamp())
+        }
+        dummy_info = {
+            'atcoder_id': 'AtCoderUser',
+            'discord_user_id': interaction.user.id,
+            'channel_id': channel_id
+        }
+        # 既存の関数を流用
+        await bot.send_ac_notification(dummy_info, dummy_sub)
+        await interaction.followup.send("✅ 提出通知のプレビューを送信しました。")
+
+    else:
+        # コンテスト通知系のプレビュー
+        # 既存の broadcast_contest を一時的にオーバーライド気味に呼び出す
+        # 本来は全サーバーに飛びますが、プレビュー用にこのチャンネルだけに送るよう細工します
+        
+        # プレビュー用の特殊関数（現在のチャンネルにのみ送る）
+        async def send_preview_contest(label, is_30min=False, is_start=False, is_end=False):
+            # 元の関数のロジックをコピーしつつ送信先を固定
+            embed = discord.Embed(title="AtCoder Beginner Contest 999", url=dummy_url, color=0xFF0000)
+            if is_30min:
+                embed.description = f"コンテストまで残り30分となりました\n\nコンテスト名：[ABC999]({dummy_url})\n👉 [参加登録する]({dummy_url})\nレーティング変化： All\n配点： {dummy_details['points']}"
+            elif is_start:
+                embed.description = f"🚀 **開始時刻となりました！**\n終了まで： <t:{int((dummy_st + timedelta(minutes=100)).timestamp())}:R>\n\n**【配点内訳】**\n{dummy_details['points']}\n\n📈 [順位表]({dummy_url}/standings) | 📝 [自分の提出]({dummy_url}/submissions/me)"
+            elif is_end:
+                embed.description = "🏁 終了時刻となりました。お疲れ様でした！"
+            else:
+                embed.description = f"コンテストページ： {dummy_url}\n開始時刻： {dummy_st.strftime('%Y-%m-%d %H:%M')}\nコンテスト時間： 100 分\nWriter： {dummy_details['writer']}\nTester： {dummy_details['tester']}\nレーティング変化： All\n配点： {dummy_details['points']}\nコンテスト開始まで： <t:{int(dummy_st.timestamp())}:R>"
+            
+            await interaction.channel.send(content=f"**{label} (Preview)**", embed=embed)
+
+        if type == "c24": await send_preview_contest("⏰ 24時間前告知")
+        elif type == "c30": await send_preview_contest("⚠️ コンテスト30分前", is_30min=True)
+        elif type == "cstart": await send_preview_contest("🚀 コンテスト開始！", is_start=True)
+        elif type == "cend": await send_preview_contest("🏁 コンテスト終了！", is_end=True)
+        
+        await interaction.followup.send("✅ コンテスト告知のプレビューを送信しました。")
+
 if __name__ == "__main__":
     keep_alive(); bot.run(os.getenv("DISCORD_TOKEN"))
