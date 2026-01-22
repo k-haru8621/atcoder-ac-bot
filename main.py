@@ -224,7 +224,7 @@ class AtCoderBot(discord.Client):
                         if timedelta(hours=23, minutes=59) < (st_dt - now) <= timedelta(hours=24):
                             await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 24時間前告知", details)
                         if timedelta(minutes=29) < (st_dt - now) <= timedelta(minutes=30):
-                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⚠️ コンテスト30分前", details, is_30min=True)
+                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⚠️ コンテスト10分前", details, is_10min=True)
                         if timedelta(seconds=0) <= (now - st_dt) < timedelta(minutes=1):
                             await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🚀 コンテスト開始！", details, is_start=True)
                         if ":" in duration:
@@ -233,12 +233,12 @@ class AtCoderBot(discord.Client):
                                 await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🏁 コンテスト終了！", details, is_end=True)
                     except: continue
 
-    async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_30min=False, is_start=False, is_end=False):
+    async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_10min=False, is_start=False, is_end=False):
         if f"{label}_{url}" in self.sent_notifications: return
         self.sent_notifications.add(f"{label}_{url}")
         embed = discord.Embed(title=name, url=url, color=get_rated_color(rated))
-        if is_30min:
-            embed.description = f"コンテストまで残り30分となりました\n\nコンテスト名：[{name}]({url})\n👉 [参加登録する]({url})\nレーティング変化： {rated}\n配点： {details['points']}"
+        if is_10min:
+            embed.description = f"コンテストまで残り10分となりました\n\nコンテスト名：[{name}]({url})\n👉 [参加登録する]({url})\nレーティング変化： {rated}\n配点： {details['points']}"
         elif is_start:
             embed.description = f"🚀 **開始時刻となりました！**\n終了まで： <t:{int((st + timedelta(minutes=int(dur.split(':')[0])*60 + int(dur.split(':')[1]))).timestamp())}:R>\n\n**【配点内訳】**\n{details['points']}\n\n📈 [順位表]({url}/standings) | 📝 [自分の提出]({url}/submissions/me)"
         elif is_end: embed.description = "🏁 終了時刻となりました。お疲れ様でした！"
@@ -289,7 +289,7 @@ async def notice_delete(interaction: discord.Interaction):
 @app_commands.choices(type=[
     app_commands.Choice(name="提出通知 (AC)", value="ac"),
     app_commands.Choice(name="コンテスト告知 (24時間前)", value="c24"),
-    app_commands.Choice(name="コンテスト告知 (30分前)", value="c30"),
+    app_commands.Choice(name="コンテスト告知 (10分前)", value="c30"),
     app_commands.Choice(name="コンテスト告知 (開始)", value="cstart"),
     app_commands.Choice(name="コンテスト告知 (終了)", value="cend")
 ])
@@ -331,11 +331,11 @@ async def preview(interaction: discord.Interaction, type: str):
         # 本来は全サーバーに飛びますが、プレビュー用にこのチャンネルだけに送るよう細工します
         
         # プレビュー用の特殊関数（現在のチャンネルにのみ送る）
-        async def send_preview_contest(label, is_30min=False, is_start=False, is_end=False):
+        async def send_preview_contest(label, is_10min=False, is_start=False, is_end=False):
             # 元の関数のロジックをコピーしつつ送信先を固定
             embed = discord.Embed(title="AtCoder Beginner Contest 999", url=dummy_url, color=0xFF0000)
-            if is_30min:
-                embed.description = f"コンテストまで残り30分となりました\n\nコンテスト名：[ABC999]({dummy_url})\n👉 [参加登録する]({dummy_url})\nレーティング変化： All\n配点： {dummy_details['points']}"
+            if is_10min:
+                embed.description = f"コンテストまで残り10分となりました\n\nコンテスト名：[ABC999]({dummy_url})\n👉 [参加登録する]({dummy_url})\nレーティング変化： All\n配点： {dummy_details['points']}"
             elif is_start:
                 embed.description = f"🚀 **開始時刻となりました！**\n終了まで： <t:{int((dummy_st + timedelta(minutes=100)).timestamp())}:R>\n\n**【配点内訳】**\n{dummy_details['points']}\n\n📈 [順位表]({dummy_url}/standings) | 📝 [自分の提出]({dummy_url}/submissions/me)"
             elif is_end:
@@ -346,7 +346,7 @@ async def preview(interaction: discord.Interaction, type: str):
             await interaction.channel.send(content=f"**{label} (Preview)**", embed=embed)
 
         if type == "c24": await send_preview_contest("⏰ 24時間前告知")
-        elif type == "c30": await send_preview_contest("⚠️ コンテスト30分前", is_30min=True)
+        elif type == "c30": await send_preview_contest("⚠️ コンテスト10分前", is_10min=True)
         elif type == "cstart": await send_preview_contest("🚀 コンテスト開始！", is_start=True)
         elif type == "cend": await send_preview_contest("🏁 コンテスト終了！", is_end=True)
         
