@@ -312,12 +312,12 @@ async def preview(interaction: discord.Interaction, type: str):
         # AC通知のダミーデータ
         dummy_sub = {
             'id': 0, 'problem_id': 'abc999_a', 'contest_id': 'abc999',
-            'user_id': 'AtCoderUser', 'language': 'Python (3.12.1)',
+            'user_id': 'atcoder', 'language': 'Python (3.12.1)',
             'point': 100.0, 'execution_time': 15, 'result': 'AC',
             'epoch_second': int(datetime.now().timestamp())
         }
         dummy_info = {
-            'atcoder_id': 'AtCoderUser',
+            'atcoder_id': 'atcoder',
             'discord_user_id': interaction.user.id,
             'channel_id': channel_id
         }
