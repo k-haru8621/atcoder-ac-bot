@@ -210,73 +210,68 @@ class AtCoderBot(discord.Client):
         channel = self.get_channel(channel_id)
         if not channel: return
         
-        status_msg = await channel.send(f"🔍 解析プロセス可視化中... (現在時刻: {now.strftime('%H:%M:%S')})")
+        status_msg = await channel.send(f"🔍 ソース直読み解析中... (Bot時刻: {now.strftime('%H:%M:%S')})")
         async with aiohttp.ClientSession() as session:
+            # 告知詳細を取得
             recent_details = await self.fetch_recent_announcements(session, channel)
             
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
-                container = soup.find('div', id='contest-table-upcoming')
-                table = container.find('table') if container else None
                 
-                if not table:
-                    await channel.send("❌ エラー: 開催予定テーブル自体が見つかりません。")
+                # 1. 予定されたコンテストのテーブルを特定
+                container = soup.find('div', id='contest-table-upcoming')
+                if not container:
+                    await channel.send("❌ ソース内に 'contest-table-upcoming' が見つかりません。")
                     return
 
-                log_txt = "📊 **解析・計算ログ詳細**\n```\n"
+                rows = container.find_all('tr')[1:] # ヘッダー飛ばし
+                log_txt = f"📊 **ソース解析結果 (全{len(rows)}件)**\n```\n"
                 found_any = False
-                
-                rows = table.find_all('tr')[1:]
-                log_txt += f"取得行数: {len(rows)}行\n"
 
-                for i, row in enumerate(rows):
+                for row in rows:
                     cols = row.find_all('td')
-                    if len(cols) < 4: continue
+                    if len(cols) < 2: continue
+                    
                     try:
-                        name_tag = cols[1].find('a')
-                        c_name = name_tag.text if name_tag else "不明"
-                        
-                        # 1. 生の文字列を取得
+                        # 2. 時刻の抽出 (ソース内の <time> タグを狙い撃ち)
                         time_tag = row.find('time')
-                        raw_time_str = time_tag.text.strip() if time_tag else "NULL"
+                        if not time_tag: continue
+                        raw_time = time_tag.text.strip() # 例: "2026-01-24 21:00:00+0900"
                         
-                        # 2. クリーニング
-                        clean_time = re.sub(r'\(.*?\)', '', raw_time_str.replace('\xa0', ' ')).strip()
-                        
-                        # 3. datetimeオブジェクトへ変換
-                        st_dt = datetime.strptime(clean_time, '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
-                        
-                        # 4. 差分計算
-                        diff = int((st_dt - now).total_seconds() / 60)
-                        
-                        # ログに追加
-                        log_txt += f"[{i+1}] {c_name[:12]}\n"
-                        log_txt += f"   生データ: {raw_time_str}\n"
-                        log_txt += f"   変換後  : {st_dt.strftime('%H:%M')}\n"
-                        log_txt += f"   計算結果: {diff}分前\n"
+                        # 3. コンテスト名とURLの抽出
+                        a_tag = cols[1].find('a')
+                        if not a_tag: continue
+                        c_name = a_tag.text.strip()
+                        c_url = "[https://atcoder.jp](https://atcoder.jp)" + a_tag['href'].split('?')[0].rstrip('/')
 
-                        # 判定
+                        # 4. 時刻パース (ソースの形式 "%Y-%m-%d %H:%M:%S%z" に完全合致させる)
+                        st_dt = datetime.strptime(raw_time, '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                        diff = int((st_dt - now).total_seconds() / 60)
+
+                        log_txt += f"・{c_name[:15]}... | {diff}分前\n"
+
+                        # 5. 24時間判定 (0分〜1440分)
                         if 0 < diff <= 1440:
-                            raw_path = name_tag['href'].split('?')[0].rstrip('/')
-                            c_url = "[https://atcoder.jp](https://atcoder.jp)" + raw_path
-                            info = (recent_details.get(c_url) or recent_details.get(c_url + "/") or {"writer":"?","tester":"?","points":"?"})
+                            info = (recent_details.get(c_url) or 
+                                    recent_details.get(c_url + "/") or 
+                                    {"writer":"?","tester":"?","points":"?"})
                             
-                            await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "⏰ 本日開催", info)
-                            log_txt += "   => 判定: ✅ 送信対象\n"
+                            # 期間とRated情報を取得 (ソース上では cols[2]は存在しない場合があるため安全に)
+                            # 予定テーブルの構造は [時刻, 名前] の2列の場合があるため調整
+                            duration = cols[2].text.strip() if len(cols) > 2 else "不明"
+                            rated = cols[3].text.strip() if len(cols) > 3 else "不明"
+
+                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 本日開催", info)
+                            log_txt += "   => ✅ 通知送信完了\n"
                             found_any = True
-                        else:
-                            log_txt += f"   => 判定: ⏭️ 範囲外 ({'過去' if diff <= 0 else '24h超'})\n"
 
                     except Exception as e:
-                        log_txt += f"   => ❌ パースエラー: {str(e)[:30]}\n"
-                    
-                    log_txt += "--------------------\n"
+                        log_txt += f"   ❌ エラー: {str(e)[:20]}\n"
 
                 log_txt += "```"
                 if not found_any:
-                    log_txt += "\n⚠️ 24時間以内の条件に合致するコンテストはありませんでした。"
+                    log_txt += "\n⚠️ 24時間以内のコンテストは見つかりませんでした。"
                 
-                # Discordの文字数制限(2000)に配慮して送信
                 await status_msg.edit(content=log_txt[:2000])
 
     @tasks.loop(minutes=1)
