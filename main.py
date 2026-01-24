@@ -151,50 +151,43 @@ class AtCoderBot(discord.Client):
         results = {}
         try:
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
-                if resp.status != 200: return {}
-                home_source = await resp.text()
+                raw_html = await resp.text()
             
-            soup = BeautifulSoup(home_source, 'html.parser')
-            # 本質：告知パネル(panel-default)を一つずつ精査する
-            posts = soup.find_all('div', class_='panel-default')
-
-            for post in posts:
-                body = post.find('div', class_='panel-body blog-post')
-                if not body: continue
-
-                # 1. コンテストURLを抽出 (本質：本文中の最初の /contests/... リンク)
-                c_link = body.find('a', href=re.compile(r'/contests/[a-zA-Z0-9_-]+$'))
-                if not c_link: continue
+            # 本質：HTMLパースを信じず、生ソースから告知パネルの塊をぶっこ抜く
+            # &lt; などの実体参照をデコードして解析対象にする
+            import html as html_parser
+            decoded_html = html_parser.unescape(raw_html)
+            
+            # 各告知は panel-default 内にある
+            post_blocks = decoded_html.split('class="panel panel-default"')
+            
+            for block in post_blocks:
+                # コンテストURLを抽出 (例: /contests/abc442)
+                c_match = re.search(r'href="/contests/([a-zA-Z0-9_-]+)"', block)
+                if not c_match: continue
                 
-                # 絶対パスに変換してキーにする
-                c_url = "https://atcoder.jp" + c_link['href'].split('?')[0].rstrip('/')
+                c_id = c_match.group(1)
+                c_url = f"https://atcoder.jp/contests/{c_id}"
                 
-                # 2. 本文テキストを解析用に取得
-                content = body.get_text("\n") 
-                
+                # 詳細情報の抽出 (改行やタグを無視して最短一致で抜く)
                 details = {"writer": "不明", "tester": "不明", "points": "不明"}
                 
-                # 3. 各行から本質データを抽出
-                for line in content.split("\n"):
-                    line = line.strip()
-                    # Writerの抽出
-                    if "Writer" in line:
-                        details["writer"] = re.sub(r'^.*?[:：]', '', line).strip()
-                    # Testerの抽出
-                    elif "Tester" in line:
-                        details["tester"] = re.sub(r'^.*?[:：]', '', line).strip()
-                    # 配点の抽出 (本質：数字とハイフン、点、などの記号のみを拾う)
-                    elif "配点" in line or "Score" in line:
-                        p_match = re.search(r'[:：]\s*([0-9\-\s/点+]+)', line)
-                        if p_match:
-                            details["points"] = p_match.group(1).strip()
+                # 各項目を個別にサーチ
+                w = re.search(r'Writer[：:]\s*([^<-\n]+)', block)
+                if w: details["writer"] = re.sub(r'<[^>]*>', '', w.group(1)).strip()
+                
+                t = re.search(r'Tester[：:]\s*([^<-\n]+)', block)
+                if t: details["tester"] = re.sub(r'<[^>]*>', '', t.group(1)).strip()
+                
+                p = re.search(r'(?:配点|Score)[：:\s]*([0-9\-\s/点+]+)', block)
+                if p: details["points"] = p.group(1).strip()
                 
                 results[c_url] = details
 
             if log_channel:
-                await log_channel.send(f"✅ 解析エンジン完了: {len(results)}件取得")
+                await log_channel.send(f"✅ 本質解析完了: {len(results)}件取得")
         except Exception as e:
-            if log_channel: await log_channel.send(f"⚠️ 解析エンジンエラー: {e}")
+            if log_channel: await log_channel.send(f"⚠️ 解析エラー: {e}")
         return results
         
     async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_10min=False, is_start=False, is_end=False):
@@ -232,58 +225,56 @@ class AtCoderBot(discord.Client):
         channel = self.get_channel(channel_id)
         if not channel: return
         
-        status_msg = await channel.send(f"🔍 本質データ抽出中... (Bot時刻: {now.strftime('%H:%M:%S')})")
+        status_msg = await channel.send(f"⏳ 最終デプロイ確認中... ({now.strftime('%H:%M:%S')})")
         async with aiohttp.ClientSession() as session:
-            # 1. 告知ソースから「本質」データを収集
             recent_details = await self.fetch_recent_announcements(session, channel)
             
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
-                container = soup.find('div', id='contest-table-upcoming')
-                if not container: return
+                # 予定テーブル
+                table = soup.find('div', id='contest-table-upcoming')
+                if not table: return
 
-                rows = container.find_all('tr')[1:]
-                log_txt = f"📊 **本質解析結果 (全{len(rows)}件)**\n```\n"
+                rows = table.find_all('tr')[1:]
+                log_txt = "📊 **最終解析結果**\n```\n"
                 found_any = False
 
                 for row in rows:
                     cols = row.find_all('td')
                     if len(cols) < 2: continue
                     
-                    try:
-                        time_tag = row.find('time')
-                        a_tag = cols[1].find('a')
-                        if not time_tag or not a_tag: continue
+                    time_tag = row.find('time')
+                    a_tag = cols[1].find('a')
+                    if not time_tag or not a_tag: continue
 
-                        # URLの正規化 ( recent_details のキーと完全に合わせる )
-                        c_url = "[https://atcoder.jp](https://atcoder.jp)" + a_tag['href'].split('?')[0].rstrip('/')
-                        c_name = a_tag.text.strip()
-                        
-                        # 時刻判定
+                    c_url = "[https://atcoder.jp](https://atcoder.jp)" + a_tag['href'].split('?')[0].rstrip('/')
+                    c_name = a_tag.text.strip()
+                    
+                    try:
                         st_dt = datetime.strptime(time_tag.text.strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
                         diff = int((st_dt - now).total_seconds() / 60)
 
                         if 0 < diff <= 1440:
-                            # 2. 収集した「本質」と照合
-                            # infoがNoneにならないよう、最低限の辞書を保証
+                            # 取得した本質データと合体
                             info = recent_details.get(c_url, {"writer":"確認中","tester":"確認中","points":"確認中"})
                             
-                            duration = cols[2].text.strip() if len(cols) > 2 else "不明"
-                            rated = cols[3].text.strip() if len(cols) > 3 else "不明"
-
-                            # 3. 通知送信
-                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 本日開催", info)
-                            
-                            log_txt += f"・{c_name[:15]}... | ✅ 送信\n"
-                            found_any = True
+                            # Embed送信で失敗してもループを止めないガード
+                            try:
+                                # 列の存在チェックを厳密に
+                                duration = cols[2].text.strip() if len(cols) > 2 else "不明"
+                                rated = cols[3].text.strip() if len(cols) > 3 else "不明"
+                                
+                                await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 本日開催", info)
+                                log_txt += f"・{c_name[:12]} | ✅ 送信成功\n"
+                                found_any = True
+                            except Exception as discord_e:
+                                log_txt += f"・{c_name[:12]} | ❌ 400エラー: {str(discord_e)[:10]}\n"
                         else:
-                            log_txt += f"・{c_name[:15]}... | {diff}分前\n"
-
-                    except Exception as e:
-                        log_txt += f"   ❌ {c_name[:10]}...: {str(e)[:15]}\n"
+                            log_txt += f"・{c_name[:12]} | {diff}分前\n"
+                    except: continue
 
                 log_txt += "```"
-                await status_msg.edit(content=log_txt[:2000])
+                await status_msg.edit(content=log_txt)
                 
     @tasks.loop(minutes=1)
     async def auto_contest_scheduler(self):
