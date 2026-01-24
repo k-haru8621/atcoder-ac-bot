@@ -212,23 +212,35 @@ class AtCoderBot(discord.Client):
             if channel: await channel.send(content=f"**{label}**", embed=embed)
 
     def create_contest_embed(self, name, url, st, dur, rated, details, is_10min=False, is_start=False, is_end=False):
+        # 本質：どんなデータが来ても「文字」として成立させる
+        def clean(text):
+            if not text: return "不明"
+            # 残っているHTMLタグを完全に排除
+            res = re.sub(r'<[^>]*>', '', str(text)).strip()
+            return res if res else "不明"
+
+        writer = clean(details.get('writer'))
+        tester = clean(details.get('tester'))
+        points = clean(details.get('points'))
+
         embed = discord.Embed(title=name, url=url, color=get_rated_color(rated))
+        
+        # 本質：Embedの文字数制限と空文字禁止を回避
         if is_10min:
-            embed.description = f"コンテストまで残り30分！\n👉 [参加登録]({url})\n配点： {details['points']}"
+            embed.description = f"コンテストまで残り30分！\n👉 [参加登録]({url})\n配点： {points[:1000]}"
         elif is_start:
-            try:
-                h, m = map(int, dur.split(':'))
-                end_ts = int((st + timedelta(hours=h, minutes=m)).timestamp())
-            except: end_ts = 0
-            embed.description = f"🚀 **開始！** 終了まで： <t:{end_ts}:R>\n\n**配点**： {details['points']}\n📈 [順位表]({url}/standings)"
-        elif is_end:
-            embed.description = f"🏁 **終了！** お疲れ様でした！\n📈 [最終順位表]({url}/standings) | 📝 [自分の提出]({url}/submissions/me)"
+            embed.description = f"🚀 **開始！**\n\n**配点**： {points[:1000]}\n📈 [順位表]({url}/standings)"
         else:
-            embed.description = (f"開始： {st.strftime('%Y-%m-%d %H:%M')}\n時間： {dur} 分\n"
-                                 f"Writer： {details['writer']} / Tester： {details['tester']}\n"
-                                 f"Rated： {rated} / 配点： {details['points']}\n"
+            # 24時間前/本日開催通知
+            embed.description = (f"開始： {st.strftime('%Y-%m-%d %H:%M')}\n"
+                                 f"時間： {dur} 分\n"
+                                 f"Writer： {writer[:500]}\n"
+                                 f"Tester： {tester[:500]}\n"
+                                 f"Rated： {rated}\n"
+                                 f"配点： {points[:500]}\n"
                                  f"開始まで： <t:{int(st.timestamp())}:R>")
-            embed.set_footer(text=f"開始時刻：{st.strftime('%Y/%m/%d %p %I:%M:%S')}")
+        
+        embed.set_footer(text=f"AtCoder - {st.strftime('%Y/%m/%d')}")
         return embed
 
     async def check_immediate_announcement(self, channel_id):
