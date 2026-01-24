@@ -180,57 +180,81 @@ class AtCoderBot(discord.Client):
     # --- 告知スクレイピング ---
     async def fetch_recent_announcements(self, session):
         results = {}
+        now = datetime.now(JST)
         try:
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
+                if resp.status != 200: return {}
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
-                for box in soup.select('div.col-md-9 div'):
-                    h4 = box.find('h4')
-                    if h4 and h4.find('a') and '/contests/' in h4.find('a')['href']:
-                        c_url = "https://atcoder.jp" + h4.find('a')['href']
-                        text = box.get_text()
-                        writer, tester, points = "不明", "不明", "不明"
-                        w_match = re.search(r"Writer[:：]\s*(.*)", text) or re.search(r"作問[:：]\s*(.*)", text)
-                        if w_match: writer = w_match.group(1).split('\n')[0].strip()
-                        t_match = re.search(r"Tester[:：]\s*(.*)", text)
-                        if t_match: tester = t_match.group(1).split('\n')[0].strip()
-                        p_match = re.search(r"(?:配点|Score)[:：]?\s*([0-9\-\s/]+)|配点は\s*([0-9\-\s/]+)\s*です", text)
-                        if p_match: points = (p_match.group(1) or p_match.group(2)).strip()
-                        results[c_url] = {"writer": writer, "tester": tester, "points": points}
+                
+                # 「お知らせ」セクションの各投稿をループ
+                for post in soup.select('div.panel-body.blog-post'):
+                    # 投稿時刻の取得と判定 (24時間以内か)
+                    header = post.find_previous('div', class_='panel-heading')
+                    time_tag = header.find('time') if header else None
+                    if time_tag and 'datetime' in time_tag.attrs:
+                        # AtCoderのdatetime属性は "YYYY/MM/DD HH:MM:SS" 形式
+                        post_time = datetime.strptime(time_tag['datetime'], '%Y/%m/%d %H:%M:%S').replace(tzinfo=JST)
+                        if now - post_time > timedelta(hours=24):
+                            continue # 24時間より古い告知はスルー
+
+                    content = post.get_text(separator="\n")
+                    link = post.find('a', href=re.compile(r'/contests/[^/]+$'))
+                    if not link: continue
+                    c_url = "https://atcoder.jp" + link['href'].split('?')[0]
+                    
+                    # 必要な情報(Writer/配点)を正規表現で引っこ抜く
+                    details = {"writer": "不明", "tester": "不明", "points": "不明"}
+                    w_m = re.search(r"Writer[:：]\s*(.*)", content) or re.search(r"作問[:：]\s*(.*)", content)
+                    if w_m: details["writer"] = w_m.group(1).split('\n')[0].strip()
+                    p_m = re.search(r"(?:配点|Score)[:：]?\s*([0-9\-\s/]+)|配点は\s*([0-9\-\s/]+)\s*です", content)
+                    if p_m: details["points"] = (p_m.group(1) or p_m.group(2)).strip()
+                    
+                    results[c_url] = details
         except: pass
         return results
 
     # --- コンテストスケジュール (IndexError対策済) ---
     @tasks.loop(minutes=1)
     async def auto_contest_scheduler(self):
-        now = datetime.now(JST)
+        now = datetime.now(JST).replace(second=0, microsecond=0)
         async with aiohttp.ClientSession() as session:
+            # 24時間以内の最新告知データを取得
             recent_details = await self.fetch_recent_announcements(session)
+            
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 if resp.status != 200: return
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
                 table = soup.find('div', id='contest-table-upcoming')
-                if not table: return
+                if not table or not table.find_all('tr'): return
+                
                 for row in table.find_all('tr')[1:]:
                     cols = row.find_all('td')
-                    if len(cols) < 4: continue 
+                    if len(cols) < 4: continue
                     try:
-                        st_dt = datetime.strptime(cols[0].text.strip(), '%Y-%m-%d %H:%M:%S%z')
+                        # 開始時刻をパース
+                        time_tag = row.find('time')
+                        st_str = re.sub(r'\([A-Za-z]+\)', '', time_tag.text).strip()
+                        st_dt = datetime.strptime(st_str, '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                        st_dt_min = st_dt.replace(second=0, microsecond=0)
+                        
                         name_tag = cols[1].find('a')
-                        if not name_tag: continue
-                        c_name, c_url = name_tag.text, "https://atcoder.jp" + name_tag['href']
-                        duration, rated = cols[2].text.strip(), cols[3].text.strip()
-                        details = recent_details.get(c_url, {"writer": "不明", "tester": "不明", "points": "不明"})
+                        c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0]
+                        
+                        # 残り時間を計算
+                        diff_min = int((st_dt_min - now).total_seconds() / 60)
 
-                        if timedelta(hours=23, minutes=59) < (st_dt - now) <= timedelta(hours=24):
-                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⏰ 24時間前告知", details)
-                        if timedelta(minutes=29) < (st_dt - now) <= timedelta(minutes=30):
-                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "⚠️ コンテスト10分前", details, is_10min=True)
-                        if timedelta(seconds=0) <= (now - st_dt) < timedelta(minutes=1):
-                            await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🚀 コンテスト開始！", details, is_start=True)
-                        if ":" in duration:
-                            h, m = map(int, duration.split(':'))
-                            if timedelta(seconds=0) <= (now - (st_dt + timedelta(hours=h, minutes=m))) < timedelta(minutes=1):
-                                await self.broadcast_contest(c_name, c_url, st_dt, duration, rated, "🏁 コンテスト終了！", details, is_end=True)
+                        # --- 通知判定 ---
+                        if diff_min == 1440: # ちょうど24時間前
+                            details = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "⏰ 24時間前告知", details)
+                        
+                        elif diff_min == 30: # 30分前
+                            details = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "⚠️ コンテスト30分前", details, is_10min=True)
+                        
+                        elif diff_min == 0: # 開始
+                            details = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "🚀 コンテスト開始！", details, is_start=True)
                     except: continue
 
     async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_10min=False, is_start=False, is_end=False):
