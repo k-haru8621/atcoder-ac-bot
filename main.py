@@ -214,37 +214,51 @@ class AtCoderBot(discord.Client):
             recent_details = await self.fetch_recent_announcements(session, channel)
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
-                # 修正：divの直下ではなく、その中のtableを明示的に指定
                 container = soup.find('div', id='contest-table-upcoming')
                 table = container.find('table') if container else None
                 
                 if not table:
-                    await channel.send("⚠️ エラー: 開催予定テーブルが見つかりません。構造が変わった可能性があります。")
+                    await channel.send("⚠️ 開催予定テーブルが見つかりませんでした。")
                     return
 
                 log_txt = "📊 **解析ログ**\n"
+                found_any = False
                 for row in table.find_all('tr')[1:]:
                     cols = row.find_all('td')
                     if len(cols) < 4: continue
                     try:
                         time_tag = row.find('time')
-                        # 修正：不破壊スペースの除去とパースの安定化
                         time_str = time_tag.text.replace('\xa0', ' ').strip()
-                        st_dt = datetime.strptime(re.sub(r'\(.*?\)', '', time_str).strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                        st_dt = datetime.strptime(re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{4}', time_str).group(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
                         
                         diff = int((st_dt - now).total_seconds() / 60)
                         name_tag = cols[1].find('a')
                         c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0].rstrip('/')
                         
-                        log_txt += f"・{name_tag.text[:10]}...: {diff}分 "
-                        # 48時間以内なら表示
-                        if 0 < diff <= 2880:
-                            info = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
-                            await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "⏰ 近日開催のコンテスト", info)
-                            log_txt += "✅\n"
-                        else: log_txt += "⏭️\n"
+                        log_txt += f"・{name_tag.text[:10]}...: {diff}分前 "
+                        
+                        # --- 即時通知ロジック ---
+                        info = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
+                        dur = cols[2].text.strip()
+                        rated = cols[3].text.strip()
+
+                        # 状況に応じてラベルを切り替えて通知
+                        if 0 < diff <= 30:
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "⚠️ 直前告知 (30分以内)", info, is_10min=True)
+                            log_txt += "📢(30m)\n"
+                            found_any = True
+                        elif 30 < diff <= 1440:
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "⏰ 近日開催 (24時間以内)", info)
+                            log_txt += "📢(24h)\n"
+                            found_any = True
+                        else:
+                            log_txt += "⏭️\n"
+
                     except Exception as e:
-                        log_txt += f"❌ パース失敗: {e}\n"
+                        log_txt += f"❌ エラー: {e}\n"
+                
+                if not found_any:
+                    log_txt += "\n※24時間以内に開始されるコンテストはありませんでした。"
                 
                 await status_msg.edit(content=log_txt[:2000])
 
