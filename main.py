@@ -151,41 +151,52 @@ class AtCoderBot(discord.Client):
         results = {}
         try:
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
-                raw_html = await resp.text()
+                html = await resp.text()
             
-            # 本質：HTMLパースを信じず、生ソースから告知パネルの塊をぶっこ抜く
-            # &lt; などの実体参照をデコードして解析対象にする
+            # 生のHTMLをデコードして、人間が見ている状態と同じにする
             import html as html_parser
-            decoded_html = html_parser.unescape(raw_html)
+            decoded = html_parser.unescape(html)
+            soup = BeautifulSoup(decoded, 'html.parser')
             
-            # 各告知は panel-default 内にある
-            post_blocks = decoded_html.split('class="panel panel-default"')
+            # 本質：この「告知パネル」自体を1つのコンテスト情報として独立して扱う
+            posts = soup.find_all('div', class_='panel-default')
             
-            for block in post_blocks:
-                # コンテストURLを抽出 (例: /contests/abc442)
-                c_match = re.search(r'href="/contests/([a-zA-Z0-9_-]+)"', block)
-                if not c_match: continue
+            for post in posts:
+                # 告知の本文を取得
+                body = post.find('div', class_='panel-body blog-post')
+                if not body: continue
                 
-                c_id = c_match.group(1)
-                c_url = f"https://atcoder.jp/contests/{c_id}"
+                # 1. コンテストURLを本文から抽出（紐付けの唯一の真実）
+                # 例: https://atcoder.jp/contests/abc442
+                link_tag = body.find('a', href=re.compile(r'https://atcoder\.jp/contests/[^" \n]+'))
+                if not link_tag: continue
+                c_url = link_tag['href'].split('?')[0].rstrip('/')
                 
-                # 詳細情報の抽出 (改行やタグを無視して最短一致で抜く)
-                details = {"writer": "不明", "tester": "不明", "points": "不明"}
+                # 2. 本文をテキスト化し、構造的にデータを抜き出す
+                content = body.get_text("\n")
                 
-                # 各項目を個別にサーチ
-                w = re.search(r'Writer[：:]\s*([^<-\n]+)', block)
-                if w: details["writer"] = re.sub(r'<[^>]*>', '', w.group(1)).strip()
+                info = {
+                    "name": link_tag.get_text().strip(), # 告知内のコンテスト名
+                    "writer": "不明",
+                    "tester": "不明",
+                    "points": "未発表",
+                    "start_time": None
+                }
+
+                # 本質：提示されたソースの各行（- Writer: 等）を忠実にパース
+                for line in content.split("\n"):
+                    line = line.strip()
+                    if "Writer：" in line:
+                        info["writer"] = line.replace("- Writer：", "").strip()
+                    elif "Tester：" in line:
+                        info["tester"] = line.replace("- Tester：", "").strip()
+                    elif "配点：" in line:
+                        info["points"] = line.replace("- 配点：", "").strip()
                 
-                t = re.search(r'Tester[：:]\s*([^<-\n]+)', block)
-                if t: details["tester"] = re.sub(r'<[^>]*>', '', t.group(1)).strip()
-                
-                p = re.search(r'(?:配点|Score)[：:\s]*([0-9\-\s/点+]+)', block)
-                if p: details["points"] = p.group(1).strip()
-                
-                results[c_url] = details
+                results[c_url] = info
 
             if log_channel:
-                await log_channel.send(f"✅ 本質解析完了: {len(results)}件取得")
+                await log_channel.send(f"✅ 真の解析完了: {len(results)}件の告知を完全捕捉")
         except Exception as e:
             if log_channel: await log_channel.send(f"⚠️ 解析エラー: {e}")
         return results
