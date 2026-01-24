@@ -234,31 +234,59 @@ class AtCoderBot(discord.Client):
     # --- 後出し通知（notice_set用） ---
     async def check_immediate_announcement(self, channel_id):
         now = datetime.now(JST).replace(second=0, microsecond=0)
-        async with aiohttp.ClientSession() as session:
-            recent_details = await self.fetch_recent_announcements(session)
-            async with session.get("https://atcoder.jp/home?lang=ja") as resp:
-                if resp.status != 200: return
-                soup = BeautifulSoup(await resp.text(), 'html.parser')
-                table = soup.find('div', id='contest-table-upcoming')
-                if not table: return
-                for row in table.find_all('tr')[1:]:
-                    cols = row.find_all('td')
-                    if len(cols) < 4: continue
-                    try:
-                        time_tag = row.find('time')
-                        st_dt = datetime.strptime(re.sub(r'\(.*?\)', '', time_tag.text).strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
-                        diff = int((st_dt.replace(second=0, microsecond=0) - now).total_seconds() / 60)
-                        # 24時間以内かつ開始前のものを即時告知
-                        if 0 < diff <= 1440:
-                            name_tag = cols[1].find('a')
-                            c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0]
-                            info = recent_details.get(c_url, {"writer": "不明", "tester": "不明", "points": "不明"})
-                            channel = self.get_channel(channel_id)
-                            if channel:
-                                embed = self.create_contest_embed(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), info)
-                                await channel.send(content="**⏰ 24時間以内告知**", embed=embed)
-                    except: continue
+        channel = self.get_channel(channel_id)
+        if not channel: return
 
+        # 進捗確認用のメッセージを送る
+        status_msg = await channel.send("🔍 ソースコードを解析中...")
+
+        async with aiohttp.ClientSession() as session:
+            # 1. Homeの生ソースを取得
+            async with session.get("https://atcoder.jp/home?lang=ja") as resp:
+                home_source = await resp.text()
+            
+            # 2. 今後の予定テーブルを解析（ここは既存のTable解析でOK）
+            soup = BeautifulSoup(home_source, 'html.parser')
+            table = soup.find('div', id='contest-table-upcoming')
+            if not table:
+                await status_msg.edit(content="❌ 今後の予定テーブルが見つかりませんでした。")
+                return
+
+            recent_details = await self.fetch_recent_announcements(session)
+            # デバッグ: 取得できたURLの数を表示
+            await status_msg.edit(content=f"🔍 解析完了: {len(recent_details)} 件の告知記事を読み込みました。")
+
+            found_any = False
+            for row in table.find_all('tr')[1:]:
+                cols = row.find_all('td')
+                if len(cols) < 4: continue
+                try:
+                    time_tag = row.find('time')
+                    st_dt = datetime.strptime(re.sub(r'\(.*?\)', '', time_tag.text).strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                    diff = int((st_dt - now).total_seconds() / 60)
+                    
+                    # 24時間以内
+                    if 0 < diff <= 1440:
+                        name_tag = cols[1].find('a')
+                        c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0].rstrip('/')
+                        
+                        # 重要：ここで詳細データがあるかチェック
+                        info = recent_details.get(c_url)
+                        if not info:
+                            # もし見つからなければ「不明」で無理やり進める
+                            info = {"writer": "ソースから取得失敗", "tester": "不明", "points": "不明"}
+                        
+                        embed = self.create_contest_embed(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), info)
+                        await channel.send(content="**⏰ 24時間以内告知 (即時)**", embed=embed)
+                        found_any = True
+                except Exception as e:
+                    print(f"Loop Error: {e}")
+
+            if found_any:
+                await status_msg.delete()
+            else:
+                await status_msg.edit(content="ℹ️ 24時間以内に開始されるコンテストはありませんでした。")
+                
     @tasks.loop(minutes=1)
     async def auto_contest_scheduler(self):
         now = datetime.now(JST).replace(second=0, microsecond=0)
