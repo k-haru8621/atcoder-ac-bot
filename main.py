@@ -290,40 +290,70 @@ class AtCoderBot(discord.Client):
 
 bot = AtCoderBot()
 
-# --- コマンド一覧 ---
+# --- コマンド一覧（3秒制限回避 + 生ソース解析対応） ---
+
 @bot.tree.command(name="register", description="提出通知の登録")
 async def register(interaction: discord.Interaction, discord_user: discord.Member, atcoder_id: str, channel: discord.TextChannel, only_ac: bool):
+    # 1. 3秒制限対策: 何よりも先に即座に応答を予約
     await interaction.response.defer()
-    info = {"guild_id": interaction.guild_id, "discord_user_id": discord_user.id, "atcoder_id": atcoder_id, "channel_id": channel.id, "only_ac": only_ac, "last_sub_id": 0}
+    
+    # 2. データの作成と保存
+    info = {
+        "guild_id": interaction.guild_id, 
+        "discord_user_id": discord_user.id, 
+        "atcoder_id": atcoder_id, 
+        "channel_id": channel.id, 
+        "only_ac": only_ac, 
+        "last_sub_id": 0
+    }
     bot.user_data[f"{interaction.guild_id}_{atcoder_id}"] = info
-    bot.save_to_sheets(); await interaction.followup.send(f"✅ `{atcoder_id}` 登録完了。")
-    async with aiohttp.ClientSession() as session: await bot.process_submissions(session, info, lookback_seconds=86400)
+    
+    # Google Sheets保存（時間がかかる可能性あり）
+    bot.save_to_sheets()
+    
+    # 3. 完了通知（deferしているので followup を使用）
+    await interaction.followup.send(f"✅ `{atcoder_id}` の登録が完了しました。")
+    
+    # 4. 初回の提出チェック実行
+    async with aiohttp.ClientSession() as session:
+        await bot.process_submissions(session, info, lookback_seconds=86400)
 
 @bot.tree.command(name="delete", description="提出通知の削除")
 async def delete(interaction: discord.Interaction, atcoder_id: str):
     await interaction.response.defer()
+    
     key = f"{interaction.guild_id}_{atcoder_id}"
     if key in bot.user_data:
-        del bot.user_data[key]; bot.save_to_sheets()
+        del bot.user_data[key]
+        bot.save_to_sheets()
         await interaction.followup.send(f"🗑️ `{atcoder_id}` の通知設定を削除しました。")
-    else: await interaction.followup.send("登録が見つかりませんでした。", ephemeral=True)
+    else:
+        await interaction.followup.send("登録が見つかりませんでした。", ephemeral=True)
 
 @bot.tree.command(name="notice_set", description="コンテスト告知チャンネルの設定")
 async def notice_set(interaction: discord.Interaction, channel: discord.TextChannel):
+    # 即座に応答予約
     await interaction.response.defer()
+    
     bot.news_config[str(interaction.guild_id)] = channel.id
     bot.save_to_sheets()
+    
     await interaction.followup.send(f"✅ 告知先を {channel.mention} に設定しました。24時間以内のコンテストがあれば即時告知します。")
+    
+    # 生ソース解析を用いた即時告知チェック
     await bot.check_immediate_announcement(channel.id)
 
 @bot.tree.command(name="notice_delete", description="コンテスト告知設定の削除")
 async def notice_delete(interaction: discord.Interaction):
     await interaction.response.defer()
+    
     gid = str(interaction.guild_id)
     if gid in bot.news_config:
-        del bot.news_config[gid]; bot.save_to_sheets()
+        del bot.news_config[gid]
+        bot.save_to_sheets()
         await interaction.followup.send("🗑️ コンテスト告知の設定を削除しました。")
-    else: await interaction.followup.send("設定が見つかりませんでした。", ephemeral=True)
+    else:
+        await interaction.followup.send("設定が見つかりませんでした。", ephemeral=True)
 
 @bot.tree.command(name="preview", description="各種通知の見た目を確認します")
 @app_commands.choices(type=[
@@ -334,21 +364,35 @@ async def notice_delete(interaction: discord.Interaction):
     app_commands.Choice(name="コンテスト告知 (終了)", value="cend")
 ])
 async def preview(interaction: discord.Interaction, type: str):
+    # プレビューも重くなることがあるので defer
     await interaction.response.defer(ephemeral=True)
+    
     dummy_details = {"writer": "AtCoder_Staff", "tester": "Admin_Tester", "points": "100-200-300-400-500-600"}
     dummy_url = "https://atcoder.jp/contests/practice"
     dummy_st = datetime.now(JST)
+    
     if type == "ac":
-        dummy_sub = {'id': 0, 'problem_id': 'abc999_a', 'contest_id': 'abc999', 'user_id': 'atcoder', 'language': 'Python (3.12.1)', 'point': 100.0, 'execution_time': 15, 'result': 'AC', 'epoch_second': int(datetime.now().timestamp())}
-        dummy_info = {'atcoder_id': 'atcoder', 'discord_user_id': interaction.user.id, 'channel_id': interaction.channel_id}
+        dummy_sub = {
+            'id': 0, 'problem_id': 'abc999_a', 'contest_id': 'abc999', 
+            'user_id': 'atcoder', 'language': 'Python (3.12.1)', 
+            'point': 100.0, 'execution_time': 15, 'result': 'AC', 
+            'epoch_second': int(datetime.now().timestamp())
+        }
+        dummy_info = {
+            'atcoder_id': 'atcoder', 
+            'discord_user_id': interaction.user.id, 
+            'channel_id': interaction.channel_id
+        }
         await bot.send_ac_notification(dummy_info, dummy_sub)
     else:
         if type == "c24": e = bot.create_contest_embed("Preview ABC999", dummy_url, dummy_st, "100:00", "All", dummy_details)
         elif type == "c30": e = bot.create_contest_embed("Preview ABC999", dummy_url, dummy_st, "100:00", "All", dummy_details, is_10min=True)
         elif type == "cstart": e = bot.create_contest_embed("Preview ABC999", dummy_url, dummy_st, "100:00", "All", dummy_details, is_start=True)
         elif type == "cend": e = bot.create_contest_embed("Preview ABC999", dummy_url, dummy_st, "100:00", "All", dummy_details, is_end=True)
+        
         await interaction.channel.send(content=f"**Preview**", embed=e)
+    
     await interaction.followup.send("✅ プレビューを送信しました。")
-
+    
 if __name__ == "__main__":
     keep_alive(); bot.run(os.getenv("DISCORD_TOKEN"))
