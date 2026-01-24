@@ -209,9 +209,12 @@ class AtCoderBot(discord.Client):
         now = datetime.now(JST)
         channel = self.get_channel(channel_id)
         if not channel: return
-        status_msg = await channel.send("🚀 全コンテストを高速照合中...")
+        
+        status_msg = await channel.send("🚀 24時間以内のコンテストを照合中...")
         async with aiohttp.ClientSession() as session:
+            # 詳細データの取得
             recent_details = await self.fetch_recent_announcements(session, channel)
+            
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
                 container = soup.find('div', id='contest-table-upcoming')
@@ -229,36 +232,43 @@ class AtCoderBot(discord.Client):
                     try:
                         time_tag = row.find('time')
                         time_str = time_tag.text.replace('\xa0', ' ').strip()
-                        st_dt = datetime.strptime(re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{4}', time_str).group(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                        # 曜日などのカッコを除去
+                        clean_time = re.sub(r'\(.*?\)', '', time_str).strip()
+                        st_dt = datetime.strptime(clean_time, '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
                         
+                        # 差分（分）を計算
                         diff = int((st_dt - now).total_seconds() / 60)
                         name_tag = cols[1].find('a')
-                        c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0].rstrip('/')
                         
-                        log_txt += f"・{name_tag.text[:10]}...: {diff}分前 "
+                        # URL正規化
+                        raw_path = name_tag['href'].split('?')[0].split('#')[0].rstrip('/')
+                        c_url = "https://atcoder.jp" + raw_path
                         
-                        # --- 即時通知ロジック ---
-                        info = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
-                        dur = cols[2].text.strip()
-                        rated = cols[3].text.strip()
-
-                        # 状況に応じてラベルを切り替えて通知
-                        if 0 < diff <= 30:
-                            await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "⚠️ 直前告知 (30分以内)", info, is_10min=True)
-                            log_txt += "📢(30m)\n"
-                            found_any = True
-                        elif 30 < diff <= 1440:
-                            await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "⏰ 近日開催 (24時間以内)", info)
-                            log_txt += "📢(24h)\n"
+                        # 【指示通り】24時間（1440分）以内のみを判定
+                        if 0 < diff <= 1440:
+                            # 照合（スラッシュの有無を許容）
+                            info = (recent_details.get(c_url) or 
+                                    recent_details.get(c_url + "/") or 
+                                    {"writer":"不明","tester":"不明","points":"不明"})
+                            
+                            dur = cols[2].text.strip()
+                            rated = cols[3].text.strip()
+                            
+                            # 1時間以内なら「直前」、それ以外（24時間以内）なら「本日開催」
+                            label = "⚠️ 直前告知" if diff < 60 else "⏰ 本日開催のコンテスト"
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, label, info)
+                            
+                            log_txt += f"・{name_tag.text[:10]}...: {diff}分前 ✅\n"
                             found_any = True
                         else:
-                            log_txt += "⏭️\n"
+                            # 24時間を超えるものはスキップ
+                            log_txt += f"・{name_tag.text[:10]}...: {diff}分前 ⏭️(範囲外)\n"
 
                     except Exception as e:
-                        log_txt += f"❌ エラー: {e}\n"
+                        log_txt += f"❌ パース失敗: {e}\n"
                 
                 if not found_any:
-                    log_txt += "\n※24時間以内に開始されるコンテストはありませんでした。"
+                    log_txt += "\n※24時間以内に開始されるコンテストはありません。"
                 
                 await status_msg.edit(content=log_txt[:2000])
 
