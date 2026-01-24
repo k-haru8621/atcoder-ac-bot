@@ -210,9 +210,8 @@ class AtCoderBot(discord.Client):
         channel = self.get_channel(channel_id)
         if not channel: return
         
-        status_msg = await channel.send("🚀 24時間以内のコンテストを照合中...")
+        status_msg = await channel.send(f"🔍 解析プロセス可視化中... (現在時刻: {now.strftime('%H:%M:%S')})")
         async with aiohttp.ClientSession() as session:
-            # 詳細データの取得
             recent_details = await self.fetch_recent_announcements(session, channel)
             
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
@@ -221,55 +220,63 @@ class AtCoderBot(discord.Client):
                 table = container.find('table') if container else None
                 
                 if not table:
-                    await channel.send("⚠️ 開催予定テーブルが見つかりませんでした。")
+                    await channel.send("❌ エラー: 開催予定テーブル自体が見つかりません。")
                     return
 
-                log_txt = "📊 **解析ログ**\n"
+                log_txt = "📊 **解析・計算ログ詳細**\n```\n"
                 found_any = False
-                for row in table.find_all('tr')[1:]:
+                
+                rows = table.find_all('tr')[1:]
+                log_txt += f"取得行数: {len(rows)}行\n"
+
+                for i, row in enumerate(rows):
                     cols = row.find_all('td')
                     if len(cols) < 4: continue
                     try:
+                        name_tag = cols[1].find('a')
+                        c_name = name_tag.text if name_tag else "不明"
+                        
+                        # 1. 生の文字列を取得
                         time_tag = row.find('time')
-                        time_str = time_tag.text.replace('\xa0', ' ').strip()
-                        # 曜日などのカッコを除去
-                        clean_time = re.sub(r'\(.*?\)', '', time_str).strip()
+                        raw_time_str = time_tag.text.strip() if time_tag else "NULL"
+                        
+                        # 2. クリーニング
+                        clean_time = re.sub(r'\(.*?\)', '', raw_time_str.replace('\xa0', ' ')).strip()
+                        
+                        # 3. datetimeオブジェクトへ変換
                         st_dt = datetime.strptime(clean_time, '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
                         
-                        # 差分（分）を計算
+                        # 4. 差分計算
                         diff = int((st_dt - now).total_seconds() / 60)
-                        name_tag = cols[1].find('a')
                         
-                        # URL正規化
-                        raw_path = name_tag['href'].split('?')[0].split('#')[0].rstrip('/')
-                        c_url = "https://atcoder.jp" + raw_path
-                        
-                        # 【指示通り】24時間（1440分）以内のみを判定
+                        # ログに追加
+                        log_txt += f"[{i+1}] {c_name[:12]}\n"
+                        log_txt += f"   生データ: {raw_time_str}\n"
+                        log_txt += f"   変換後  : {st_dt.strftime('%H:%M')}\n"
+                        log_txt += f"   計算結果: {diff}分前\n"
+
+                        # 判定
                         if 0 < diff <= 1440:
-                            # 照合（スラッシュの有無を許容）
-                            info = (recent_details.get(c_url) or 
-                                    recent_details.get(c_url + "/") or 
-                                    {"writer":"不明","tester":"不明","points":"不明"})
+                            raw_path = name_tag['href'].split('?')[0].rstrip('/')
+                            c_url = "[https://atcoder.jp](https://atcoder.jp)" + raw_path
+                            info = (recent_details.get(c_url) or recent_details.get(c_url + "/") or {"writer":"?","tester":"?","points":"?"})
                             
-                            dur = cols[2].text.strip()
-                            rated = cols[3].text.strip()
-                            
-                            # 1時間以内なら「直前」、それ以外（24時間以内）なら「本日開催」
-                            label = "⚠️ 直前告知" if diff < 60 else "⏰ 本日開催のコンテスト"
-                            await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, label, info)
-                            
-                            log_txt += f"・{name_tag.text[:10]}...: {diff}分前 ✅\n"
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "⏰ 本日開催", info)
+                            log_txt += "   => 判定: ✅ 送信対象\n"
                             found_any = True
                         else:
-                            # 24時間を超えるものはスキップ
-                            log_txt += f"・{name_tag.text[:10]}...: {diff}分前 ⏭️(範囲外)\n"
+                            log_txt += f"   => 判定: ⏭️ 範囲外 ({'過去' if diff <= 0 else '24h超'})\n"
 
                     except Exception as e:
-                        log_txt += f"❌ パース失敗: {e}\n"
-                
+                        log_txt += f"   => ❌ パースエラー: {str(e)[:30]}\n"
+                    
+                    log_txt += "--------------------\n"
+
+                log_txt += "```"
                 if not found_any:
-                    log_txt += "\n※24時間以内に開始されるコンテストはありません。"
+                    log_txt += "\n⚠️ 24時間以内の条件に合致するコンテストはありませんでした。"
                 
+                # Discordの文字数制限(2000)に配慮して送信
                 await status_msg.edit(content=log_txt[:2000])
 
     @tasks.loop(minutes=1)
