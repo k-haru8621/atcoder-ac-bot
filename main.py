@@ -156,33 +156,53 @@ class AtCoderBot(discord.Client):
     # --- 告知スクレイピング (投稿判定を72時間に緩和してデータを確保) ---
     async def fetch_recent_announcements(self, session):
         results = {}
-        now = datetime.now(JST)
         try:
+            # 1. Homeの生ソースを取得
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 if resp.status != 200: return {}
-                soup = BeautifulSoup(await resp.text(), 'html.parser')
-                for post in soup.select('div.panel.panel-default'):
-                    time_tag = post.select_one('time.timeago')
-                    if time_tag and 'datetime' in time_tag.attrs:
-                        post_time = datetime.strptime(time_tag['datetime'], '%Y/%m/%d %H:%M:%S').replace(tzinfo=JST)
-                        if now - post_time > timedelta(hours=72): continue # 古すぎる告知をスキップ
-                    content_div = post.select_one('div.blog-post')
-                    if not content_div: continue
-                    content = content_div.get_text(separator="\n")
-                    link = content_div.find('a', href=re.compile(r'/contests/[^/"]+$'))
-                    if not link: continue
-                    c_url = "https://atcoder.jp" + link['href'].split('?')[0]
-                    details = {"writer": "不明", "tester": "不明", "points": "不明"}
-                    w_m = re.search(r"Writer[:：]\s*(.*)", content) or re.search(r"作問[:：]\s*(.*)", content)
-                    if w_m: details["writer"] = w_m.group(1).split('\n')[0].strip()
-                    t_m = re.search(r"Tester[:：]\s*(.*)", content)
-                    if t_m: details["tester"] = t_m.group(1).split('\n')[0].strip()
-                    p_m = re.search(r"(?:配点|Score)[:：]?\s*([0-9\-\s/]+)|配点は\s*([0-9\-\s/]+)\s*です", content)
-                    if p_m: details["points"] = (p_m.group(1) or p_m.group(2)).strip()
-                    results[c_url] = details
-        except: pass
-        return results
+                # ブラウザの view-source: と完全に一致する生の文字列
+                home_source = await resp.text()
 
+            # 2. ソースから /posts/数字 形式のリンクを正規表現で直接ぶっこ抜く
+            # <a href="/posts/1640"> のような箇所を抽出
+            post_ids = re.findall(r'href="/posts/(\d+)"', home_source)
+            # 重複を排除してフルURL化
+            post_urls = [f"https://atcoder.jp/posts/{pid}" for pid in set(post_ids)]
+
+            for post_url in post_urls:
+                async with session.get(post_url) as resp:
+                    if resp.status != 200: continue
+                    # 個別記事の生ソースを取得
+                    raw_post_source = await resp.text()
+
+                    # 3. 生ソースから「コンテストURL」を抽出
+                    # 例: href="https://atcoder.jp/contests/arc213"
+                    c_url_match = re.search(r'https://atcoder\.jp/contests/[a-zA-Z0-9_-]+', raw_post_source)
+                    if not c_url_match: continue
+                    c_url = c_url_match.group(0)
+
+                    # 4. 生ソースの文字列から詳細情報を抽出 (HTMLタグを無視して検索)
+                    details = {"writer": "不明", "tester": "不明", "points": "不明"}
+                    
+                    # Writerを抽出 (タグが混ざってもいいように検索)
+                    w_m = re.search(r"Writer[:：]\s*([^<]+)", raw_post_source)
+                    if w_m: details["writer"] = w_m.group(1).strip()
+
+                    # Testerを抽出
+                    t_m = re.search(r"Tester[:：]\s*([^<]+)", raw_post_source)
+                    if t_m: details["tester"] = t_m.group(1).strip()
+
+                    # 配点を抽出 (一番精度が必要な部分)
+                    # 「配点は 400-500...」や「Score: 100...」など生ソースの記述を直接拾う
+                    p_m = re.search(r"(?:配点|Score)[は：\s]*([0-9\-\s/]+)", raw_post_source)
+                    if p_m: details["points"] = p_m.group(1).strip()
+
+                    results[c_url] = details
+                    
+        except Exception as e:
+            print(f"Direct Source Analysis Error: {e}")
+        return results
+        
     # --- コンテスト告知ロジック ---
     async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_10min=False, is_start=False, is_end=False):
         if f"{label}_{url}" in self.sent_notifications: return
