@@ -214,23 +214,38 @@ class AtCoderBot(discord.Client):
             recent_details = await self.fetch_recent_announcements(session, channel)
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
-                table = soup.find('div', id='contest-table-upcoming')
-                if not table: return
+                # 修正：divの直下ではなく、その中のtableを明示的に指定
+                container = soup.find('div', id='contest-table-upcoming')
+                table = container.find('table') if container else None
+                
+                if not table:
+                    await channel.send("⚠️ エラー: 開催予定テーブルが見つかりません。構造が変わった可能性があります。")
+                    return
+
                 log_txt = "📊 **解析ログ**\n"
                 for row in table.find_all('tr')[1:]:
                     cols = row.find_all('td')
                     if len(cols) < 4: continue
-                    time_tag = row.find('time')
-                    st_dt = datetime.strptime(re.sub(r'\(.*?\)', '', time_tag.text).strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
-                    diff = int((st_dt - now).total_seconds() / 60)
-                    name_tag = cols[1].find('a')
-                    c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0].rstrip('/')
-                    log_txt += f"・{name_tag.text[:10]}...: {diff}分 "
-                    if 0 < diff <= 2880:
-                        info = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
-                        await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "⏰ 近日開催のコンテスト", info)
-                        log_txt += "✅\n"
-                    else: log_txt += "⏭️\n"
+                    try:
+                        time_tag = row.find('time')
+                        # 修正：不破壊スペースの除去とパースの安定化
+                        time_str = time_tag.text.replace('\xa0', ' ').strip()
+                        st_dt = datetime.strptime(re.sub(r'\(.*?\)', '', time_str).strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                        
+                        diff = int((st_dt - now).total_seconds() / 60)
+                        name_tag = cols[1].find('a')
+                        c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0].rstrip('/')
+                        
+                        log_txt += f"・{name_tag.text[:10]}...: {diff}分 "
+                        # 48時間以内なら表示
+                        if 0 < diff <= 2880:
+                            info = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
+                            await self.broadcast_contest(name_tag.text, c_url, st_dt, cols[2].text.strip(), cols[3].text.strip(), "⏰ 近日開催のコンテスト", info)
+                            log_txt += "✅\n"
+                        else: log_txt += "⏭️\n"
+                    except Exception as e:
+                        log_txt += f"❌ パース失敗: {e}\n"
+                
                 await status_msg.edit(content=log_txt[:2000])
 
     @tasks.loop(minutes=1)
@@ -239,66 +254,43 @@ class AtCoderBot(discord.Client):
         async with aiohttp.ClientSession() as session:
             recent_details = await self.fetch_recent_announcements(session)
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
-                if resp.status != 200:
-                    print(f"[{now}] ❌ AtCoderへのアクセスに失敗しました: {resp.status}")
-                    return
+                if resp.status != 200: return
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
                 
-                html = await resp.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                # ターゲットとするテーブルID
                 for table_id in ['contest-table-upcoming', 'contest-table-active']:
                     container = soup.find('div', id=table_id)
-                    if not container:
-                        continue
-                    
-                    # 確実にtable要素を取得
+                    if not container: continue
                     table = container.find('table')
-                    if not table:
-                        continue
+                    if not table: continue
 
-                    rows = table.find_all('tr')[1:] # ヘッダーを除外
-                    for row in rows:
+                    for row in table.find_all('tr')[1:]:
                         cols = row.find_all('td')
                         if len(cols) < 4: continue
-                        
                         try:
-                            # 時刻の抽出と整形
                             time_tag = row.find('time')
-                            if not time_tag: continue
-                            
-                            # 空白文字(nbsp等)を標準スペースに置換し、余計な(Sat)などを除去
-                            raw_time = time_tag.text.replace('\xa0', ' ').strip()
-                            clean_time = re.sub(r'\(.*?\)', '', raw_time).strip()
-                            
-                            st_dt = datetime.strptime(clean_time, '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                            time_str = time_tag.text.replace('\xa0', ' ').strip()
+                            st_dt = datetime.strptime(re.sub(r'\(.*?\)', '', time_str).strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
                             
                             dur = cols[2].text.strip()
                             h, m = map(int, dur.split(':'))
                             en_dt = st_dt + timedelta(hours=h, minutes=m)
                             
-                            # 1分単位で丸めて比較
+                            # 判定の安定化：roundを使用して微小なズレを許容
                             diff_st = round((st_dt - now).total_seconds() / 60)
                             diff_en = round((en_dt - now).total_seconds() / 60)
                             
                             name_tag = cols[1].find('a')
                             c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0].rstrip('/')
-                            rated = cols[3].text.strip()
                             details = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
                             
-                            # 通知判定
-                            if diff_st == 1440:
-                                await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "⏰ 24時間前", details)
-                            elif diff_st == 30:
-                                await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "⚠️ 30分前", details, is_10min=True)
-                            elif diff_st == 0:
-                                await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "🚀 開始！", details, is_start=True)
-                            elif diff_en == 0:
-                                await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, rated, "🏁 終了！", details, is_end=True)
+                            # デバッグログ：必要に応じてコンソール等で確認
+                            # print(f"Check: {name_tag.text} / diff_st: {diff_st}")
 
-                        except Exception as e:
-                            # 原因究明のためのログ出力
-                            print(f"⚠️ 解析エラー (Contest: {name_tag.text if 'name_tag' in locals() else 'Unknown'}): {e}")
+                            if diff_st == 1440: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "⏰ 24時間前", details)
+                            elif diff_st == 30: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "⚠️ 30分前", details, is_10min=True)
+                            elif diff_st == 0: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "🚀 開始！", details, is_start=True)
+                            elif diff_en == 0: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "🏁 終了！", details, is_end=True)
+                        except:
                             continue
 
 bot = AtCoderBot()
