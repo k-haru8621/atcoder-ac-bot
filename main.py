@@ -96,27 +96,52 @@ class AtCoderBot(discord.Client):
 
     @tasks.loop(minutes=3)
     async def check_submissions(self):
+        # セッションをループの外で作成（効率化）
         async with aiohttp.ClientSession() as session:
-            for key, info in list(self.user_data.items()):
-                await self.process_submissions(session, info, lookback_seconds=259200)
+            # 辞書のコピーに対してループを回す（実行中のサイズ変更エラー防止）
+            for key in list(self.user_data.keys()):
+                info = self.user_data[key]
+                try:
+                    await self.process_submissions(session, info, lookback_seconds=259200)
+                except Exception as e:
+                    print(f"⚠️ 提出確認エラー ({key}): {e}")
 
     async def process_submissions(self, session, info, lookback_seconds):
         atcoder_id = info['atcoder_id']
-        last_id = info.get('last_sub_id', 0)
+        # last_sub_id が 0 の場合は、最新の1件だけ取得するように調整（初回爆撃防止）
+        last_id = int(info.get('last_sub_id', 0))
+        
         url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={atcoder_id}&from_second={int(datetime.now().timestamp() - lookback_seconds)}"
+        
         async with session.get(url) as resp:
             if resp.status == 200:
                 subs = await resp.json()
+                if not subs: return
+
+                # 初回登録時（last_id=0）は通知せず、最新IDの更新だけ行う
+                if last_id == 0:
+                    latest_id = max(sub['id'] for sub in subs)
+                    self.user_data[f"{info['guild_id']}_{atcoder_id}"]['last_sub_id'] = latest_id
+                    self.save_to_sheets()
+                    return
+
                 new_last_id = last_id
+                # ID順にソートして古いものから通知
                 for sub in sorted(subs, key=lambda x: x['id']):
                     if sub['id'] <= last_id: continue
-                    if info.get('only_ac', True) and sub['result'] != 'AC': continue
+                    
+                    # 結果フィルター
+                    if info.get('only_ac', True) and sub['result'] != 'AC': 
+                        new_last_id = max(new_last_id, sub['id'])
+                        continue
+                    
                     await self.send_ac_notification(info, sub)
                     new_last_id = max(new_last_id, sub['id'])
+                
                 if new_last_id > last_id:
                     self.user_data[f"{info['guild_id']}_{atcoder_id}"]['last_sub_id'] = new_last_id
                     self.save_to_sheets()
-
+                    
     async def send_ac_notification(self, info, sub):
         channel = self.get_channel(info['channel_id'])
         if not channel: return
