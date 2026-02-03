@@ -129,15 +129,13 @@ class AtCoderBot(discord.Client):
     async def process_submissions(self, session, info, lookback_seconds):
         atcoder_id = info['atcoder_id']
         guild_id = info['guild_id']
-        
-        # サーバーIDとAtCoderIDを組み合わせた「固有のキー」を作成
-        # これにより、同じAtCoderIDでもサーバーが違えば別データとして扱われる
         key = f"{guild_id}_{atcoder_id}"
         
-        # このサーバーでの「前回どこまで通知したか」を取得
+        # 過去の保存データから最後に通知したIDを取得
         last_id = int(info.get('last_sub_id', 0))
         
-        # Kenkoooo API から提出データを取得
+        # 2日分（172800秒）遡って取得するようにURLを作成
+        # 引数の lookback_seconds が 172800 (2日) であることを想定
         url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={atcoder_id}&from_second={int(datetime.now().timestamp() - lookback_seconds)}"
         
         try:
@@ -147,32 +145,28 @@ class AtCoderBot(discord.Client):
                     if not subs:
                         return
 
-                    # 初回登録時（last_id=0）は、過去分を通知せず、最新IDのセットだけ行う（爆撃防止）
-                    if last_id == 0:
-                        latest_id = max(sub['id'] for sub in subs)
-                        self.user_data[key]['last_sub_id'] = latest_id
-                        self.save_to_sheets()
-                        return
-
                     new_last_id = last_id
-                    # 提出をIDの昇順（古い順）に並べてチェック
-                    for sub in sorted(subs, key=lambda x: x['id']):
-                        # すでに通知済みのIDならスキップ
-                        if sub['id'] <= last_id:
+                    # 提出を古い順（ID昇順）に並べる
+                    sorted_subs = sorted(subs, key=lambda x: x['id'])
+
+                    for sub in sorted_subs:
+                        # 既に通知済みのIDなら飛ばす（2回目以降のループ用）
+                        if last_id != 0 and sub['id'] <= last_id:
                             continue
                         
-                        # Only AC設定がONで、結果がACでないならスキップ
+                        # ACのみ通知の設定なら、AC以外を飛ばす
                         if info.get('only_ac', True) and sub['result'] != 'AC':
                             new_last_id = max(new_last_id, sub['id'])
                             continue
                         
-                        # 通知を送信
+                        # 通知送信！
+                        # (登録直後なら、ここで過去2日分の通知が連続で飛びます)
                         await self.send_ac_notification(info, sub)
                         
-                        # 送信した最新のIDを記録
+                        # 通知した中で最新のIDを保持
                         new_last_id = max(new_last_id, sub['id'])
                     
-                    # 最後にまとめてスプレッドシートを更新
+                    # 最後にまとめて「どこまで通知したか」を保存
                     if new_last_id > last_id:
                         self.user_data[key]['last_sub_id'] = new_last_id
                         self.save_to_sheets()
