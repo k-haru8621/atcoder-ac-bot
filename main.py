@@ -61,26 +61,46 @@ class AtCoderBot(discord.Client):
         try:
             ws_user = self.sheet.worksheet("users")
             ws_user.clear()
+            # ヘッダーを書き込む
             ws_user.append_row(["GuildID", "AtCoderID", "DiscordID", "ChannelID", "OnlyAC", "LastSubID"])
-            rows = [[str(v['guild_id']), v['atcoder_id'], str(v['discord_user_id']), str(v['channel_id']), str(v['only_ac']), str(v.get('last_sub_id', 0))] for v in self.user_data.values()]
-            if rows: ws_user.append_rows(rows)
-            ws_config = self.sheet.worksheet("config")
-            ws_config.clear()
-            ws_config.append_row(["GuildID", "ChannelID"])
-            rows_config = [[str(gid), str(cid)] for gid, cid in self.news_config.items()]
-            if rows_config: ws_config.append_rows(rows_config)
-        except Exception as e: print(f"❌ 書き込み失敗: {e}")
+            
+            rows = []
+            for key, v in self.user_data.items():
+                # self.user_data の中身を1行ずつリストにする
+                rows.append([
+                    str(v['guild_id']), 
+                    v['atcoder_id'], 
+                    str(v['discord_user_id']), 
+                    str(v['channel_id']), 
+                    str(v['only_ac']), 
+                    str(v.get('last_sub_id', 0))
+                ])
+            
+            if rows:
+                ws_user.append_rows(rows) # まとめてスプレッドシートへ
+        except Exception as e:
+            print(f"❌ 書き込み失敗: {e}")
 
     def load_from_sheets(self):
         try:
             ws_user = self.sheet.worksheet("users")
             for r in ws_user.get_all_records():
-                key = f"{r['GuildID']}_{r['AtCoderID']}"
-                self.user_data[key] = {"guild_id": int(r['GuildID']), "atcoder_id": r['AtCoderID'], "discord_user_id": int(r['DiscordID']), "channel_id": int(r['ChannelID']), "only_ac": str(r['OnlyAC']).lower() == 'true', "last_sub_id": int(r.get('LastSubID', 0))}
-            ws_config = self.sheet.worksheet("config")
-            for r in ws_config.get_all_records(): self.news_config[str(r['GuildID'])] = int(r['ChannelID'])
-        except Exception as e: print(f"❌ 読み込み失敗: {e}")
-
+                # 「サーバーID_ユーザー名」で固有の鍵を作る
+                gid = str(r['GuildID'])
+                aid = r['AtCoderID']
+                key = f"{gid}_{aid}"
+                
+                self.user_data[key] = {
+                    "guild_id": int(gid),
+                    "atcoder_id": aid,
+                    "discord_user_id": int(r['DiscordID']),
+                    "channel_id": int(r['ChannelID']),
+                    "only_ac": str(r['OnlyAC']).lower() == 'true',
+                    "last_sub_id": int(r.get('LastSubID', 0))
+                }
+        except Exception as e:
+            print(f"❌ 読み込み失敗: {e}")
+            
     async def setup_hook(self):
         self.load_from_sheets()
         try:
@@ -108,40 +128,57 @@ class AtCoderBot(discord.Client):
 
     async def process_submissions(self, session, info, lookback_seconds):
         atcoder_id = info['atcoder_id']
-        # last_sub_id が 0 の場合は、最新の1件だけ取得するように調整（初回爆撃防止）
+        guild_id = info['guild_id']
+        
+        # サーバーIDとAtCoderIDを組み合わせた「固有のキー」を作成
+        # これにより、同じAtCoderIDでもサーバーが違えば別データとして扱われる
+        key = f"{guild_id}_{atcoder_id}"
+        
+        # このサーバーでの「前回どこまで通知したか」を取得
         last_id = int(info.get('last_sub_id', 0))
         
+        # Kenkoooo API から提出データを取得
         url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={atcoder_id}&from_second={int(datetime.now().timestamp() - lookback_seconds)}"
         
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                subs = await resp.json()
-                if not subs: return
+        try:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    subs = await resp.json()
+                    if not subs:
+                        return
 
-                # 初回登録時（last_id=0）は通知せず、最新IDの更新だけ行う
-                if last_id == 0:
-                    latest_id = max(sub['id'] for sub in subs)
-                    self.user_data[f"{info['guild_id']}_{atcoder_id}"]['last_sub_id'] = latest_id
-                    self.save_to_sheets()
-                    return
+                    # 初回登録時（last_id=0）は、過去分を通知せず、最新IDのセットだけ行う（爆撃防止）
+                    if last_id == 0:
+                        latest_id = max(sub['id'] for sub in subs)
+                        self.user_data[key]['last_sub_id'] = latest_id
+                        self.save_to_sheets()
+                        return
 
-                new_last_id = last_id
-                # ID順にソートして古いものから通知
-                for sub in sorted(subs, key=lambda x: x['id']):
-                    if sub['id'] <= last_id: continue
-                    
-                    # 結果フィルター
-                    if info.get('only_ac', True) and sub['result'] != 'AC': 
+                    new_last_id = last_id
+                    # 提出をIDの昇順（古い順）に並べてチェック
+                    for sub in sorted(subs, key=lambda x: x['id']):
+                        # すでに通知済みのIDならスキップ
+                        if sub['id'] <= last_id:
+                            continue
+                        
+                        # Only AC設定がONで、結果がACでないならスキップ
+                        if info.get('only_ac', True) and sub['result'] != 'AC':
+                            new_last_id = max(new_last_id, sub['id'])
+                            continue
+                        
+                        # 通知を送信
+                        await self.send_ac_notification(info, sub)
+                        
+                        # 送信した最新のIDを記録
                         new_last_id = max(new_last_id, sub['id'])
-                        continue
                     
-                    await self.send_ac_notification(info, sub)
-                    new_last_id = max(new_last_id, sub['id'])
-                
-                if new_last_id > last_id:
-                    self.user_data[f"{info['guild_id']}_{atcoder_id}"]['last_sub_id'] = new_last_id
-                    self.save_to_sheets()
-                    
+                    # 最後にまとめてスプレッドシートを更新
+                    if new_last_id > last_id:
+                        self.user_data[key]['last_sub_id'] = new_last_id
+                        self.save_to_sheets()
+        except Exception as e:
+            print(f"⚠️ process_submissions エラー ({key}): {e}")
+            
     async def send_ac_notification(self, info, sub):
         channel = self.get_channel(info['channel_id'])
         if not channel: return
