@@ -123,24 +123,26 @@ class AtCoderBot(discord.Client):
         await self.tree.sync()
 
     # --- AtCoderBotクラス内に追加 ---
-    async def fetch_user_data(self, session, atcoder_id):
-        profile_url = f"https://atcoder.jp/users/{atcoder_id}?lang=ja"
-        history_url = f"https://atcoder.jp/users/{atcoder_id}/history/json"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    # --- AtCoderBotクラス内の既存のfetch_user_dataをこれに差し替え ---
+    async def fetch_user_data(self, session, atcoder_id, mode='algo'):
+        c_type = "heuristic" if mode == 'heur' else "algorithm"
+        profile_url = f"https://atcoder.jp/users/{atcoder_id}?lang=ja&contestType={c_type}"
+        history_url = f"https://atcoder.jp/users/{atcoder_id}/history/json?contestType={c_type}"
+        headers = {"User-Agent": "Mozilla/5.0"}
         
         data = {
-            "atcoder_id": atcoder_id, "rating": 0, "max_rating": "---", 
+            "mode": mode, "atcoder_id": atcoder_id, "rating": 0, "max_rating": "---", 
             "diff": "---", "birth": "---", "org": "---", 
             "last_date": "---", "last_contest": "---", "last_contest_url": "",
             "contest_count": "---", "last_rank": "---", "rank_all": "---", "history": []
         }
 
         try:
-            # 1. コンテスト履歴 (JSON) を先に取得して最新レートと個別順位を確定
+            # 1. 履歴データの取得
             async with session.get(history_url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     h_json = await resp.json()
-                    rated_only = [h for h in h_json if h.get('IsRated')]
+                    rated_only = [h for h in h_json if h.get('IsRated') or mode == 'heur']
                     if rated_only:
                         latest_5 = rated_only[::-1][:5]
                         for i, h in enumerate(latest_5):
@@ -148,17 +150,12 @@ class AtCoderBot(discord.Client):
                             full_name = h.get('ContestName', 'Unknown')
                             c_id = h.get('ContestScreenName', '').split('.')[0]
                             
-                            # コンテスト名の略称ルール (ABC/ARC/AGC/AHC)
-                            import re
-                            if "Beginner Contest" in full_name: name = f"ABC{re.search(r'\d+', full_name).group()}"
-                            elif "Regular Contest" in full_name: name = f"ARC{re.search(r'\d+', full_name).group()}"
-                            elif "Grand Contest" in full_name: name = f"AGC{re.search(r'\d+', full_name).group()}"
-                            elif "Heuristic Contest" in full_name: name = f"AHC{re.search(r'\d+', full_name).group()}"
-                            else: name = full_name[:10]
+                            # 【修正】正規表現でABC2026問題を回避
+                            m = re.search(r'(ABC|ARC|AGC|AHC)\s*(\d+)', full_name, re.IGNORECASE)
+                            name = f"{m.group(1).upper()}{m.group(2)}" if m else full_name[:12]
 
                             data["history"].append({
-                                "name": name,
-                                "date": dt.strftime('%m/%d'),
+                                "name": name, "date": dt.strftime('%m/%d'),
                                 "perf": h.get('Performance', '---'),
                                 "rate": h.get('NewRating', '---'),
                                 "rank": h.get('Place', '---'),
@@ -175,40 +172,25 @@ class AtCoderBot(discord.Client):
                                     change = h['NewRating'] - rated_only[-2]['NewRating']
                                     data["diff"] = f"{'+' if change > 0 else ''}{change}"
 
-            # 2. プロフィールページの解析 (順位 5486th と 最高レート 1495 を取得)
+            # 2. プロフィールデータの解析
             async with session.get(profile_url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     soup = BeautifulSoup(await resp.text(), 'html.parser')
                     for t in soup.find_all('table', class_='dl-table'):
                         for row in t.find_all('tr'):
-                            th = row.find('th')
-                            td = row.find('td')
+                            th, td = row.find('th'), row.find('td')
                             if th and td:
                                 label = th.get_text(strip=True)
-                                # ★重要: get_text(" ") でタグ間にスペースを入れ、数字の合体を防ぐ
                                 val = td.get_text(" ", strip=True).replace('―', '').strip()
-                                
-                                if "順位" in label and "位" not in label:
-                                    data["rank_all"] = val # ここで 5486th を取得
+                                if "順位" in label and "位" not in label: data["rank_all"] = val
                                 if "誕生年" in label: data["birth"] = val
                                 if "所属" in label: data["org"] = val
                                 if "コンテスト参加回数" in label: data["contest_count"] = val
-                                
                                 if "Rating最高値" in label:
-                                    if val != "---":
-                                        import re
-                                        parts = val.split()
-                                        if parts:
-                                            # 最初の塊が 1495、それ以降が級や昇格情報
-                                            max_r = parts[0]
-                                            detail = " ".join(parts[1:])
-                                            data["max_rating"] = f"{max_r} ({detail})"
-                                    else:
-                                        data["max_rating"] = "---"
+                                    parts = val.split()
+                                    if parts: data["max_rating"] = f"{parts[0]} ({' '.join(parts[1:])})"
             return data
-        except Exception as e:
-            print(f"Fetch Error: {e}")
-            return None
+        except: return None
             
     @tasks.loop(minutes=3)
     async def check_submissions(self):
@@ -348,6 +330,45 @@ class AtCoderBot(discord.Client):
         for cid in self.news_config.values():
             channel = self.get_channel(cid)
             if channel: await channel.send(content=f"**{label}**", embed=embed)
+                
+    def create_status_embed(self, d, target):
+        """データ辞書dからDiscord Embedを作成する"""
+        mode_label = "Algorithm" if d['mode'] == 'algo' else "Heuristic"
+        # 既存のget_rated_colorはコンテスト用なので、レート用の色判定
+        def get_color(r):
+            colors = [(2800, 0xFF0000), (2400, 0xFF8000), (2000, 0xFFFF00), (1600, 0x0000FF), (1200, 0x00C0C0), (800, 0x008000), (400, 0x804000)]
+            for threshold, color in colors:
+                if r >= threshold: return color
+            return 0x808080
+
+        embed = discord.Embed(color=get_color(d["rating"]))
+        embed.set_author(
+            name=f"{target.name} / {d['atcoder_id']} ({mode_label})", 
+            url=f"https://atcoder.jp/users/{d['atcoder_id']}?contestType={'heuristic' if d['mode'] == 'heur' else 'algorithm'}",
+            icon_url=target.display_avatar.url
+        )
+
+        embed.add_field(
+            name="📊 現在のステータス",
+            value=(f"**現在の順位:** `{d['rank_all']}`\n"
+                   f"**現在のレーティング:** `{d['rating']}` (前回比: {d['diff']})\n"
+                   f"**最高レーティング:** `{d['max_rating']}`\n"
+                   f"**出場数:** {d['contest_count']} / **所属:** {d['org']}\n"
+                   f"**誕生年:** {d['birth']}\n"
+                   f"**最終参加:** {d['last_date']}\n"
+                   f"└ [{d['last_contest']}]({d['last_contest_url']})"), # リンク化
+            inline=False
+        )
+
+        if d["history"]:
+            # 各履歴の「n位」を順位表リンクにする
+            h_lines = [f"**{h['name']}** ({h['date']}) Perf: **{h['perf']}** → Rate: **{h['rate']}** ([{h['rank']}位]({h['url']}))" for h in d["history"]]
+            embed.add_field(name="🏆 直近のコンテスト成績", value="\n".join(h_lines), inline=False)
+
+        now = datetime.now(JST)
+        wd_ja = ["月", "火", "水", "木", "金", "土", "日"]
+        embed.set_footer(text=f"{now.strftime(f'%Y年%m月%d日({wd_ja[now.weekday()]}) %H:%M')} 時点")
+        return embed
 
     def create_contest_embed(self, name, url, st, dur_min, rated, details, is_start=False):
         # self.get_rated_color を呼び出すように変更
@@ -550,66 +571,26 @@ async def status(interaction: discord.Interaction, member: discord.Member = None
     await interaction.response.defer()
     target = member or interaction.user
     
-    # ユーザー紐付け確認
     atcoder_id = next((v['atcoder_id'] for v in bot.user_data.values() if v['discord_user_id'] == target.id), None)
     if not atcoder_id:
         return await interaction.followup.send(f"❌ {target.name} さんのIDが登録されていません。")
 
     async with aiohttp.ClientSession() as session:
-        d = await bot.fetch_user_data(session, atcoder_id)
+        # Algorithm と Heuristic 両方取得
+        algo_d = await bot.fetch_user_data(session, atcoder_id, mode='algo')
+        heur_d = await bot.fetch_user_data(session, atcoder_id, mode='heur')
 
-    # ここが重要：d が辞書（dict）でない場合はエラーとして処理する
-    if not isinstance(d, dict):
-        error_text = "データ取得失敗"
-        if isinstance(d, str):
-            if "PROFILE_NOT_FOUND" in d:
-                error_text = f"ユーザー `{atcoder_id}` が見つかりませんでした。IDが正しいか確認してください。"
-            elif "HISTORY_NOT_FOUND" in d:
-                error_text = f"`{atcoder_id}` さんのコンテスト履歴が取得できませんでした。"
-            else:
-                error_text = f"エラーが発生しました: `{d}`"
-        
-        return await interaction.followup.send(f"❌ {error_text}")
+    embeds = []
+    if algo_d:
+        embeds.append(bot.create_status_embed(algo_d, target))
+    if heur_d:
+        embeds.append(bot.create_status_embed(heur_d, target))
 
-    # 色判定
-    def get_color(r):
-        colors = [(2800, 0xFF0000), (2400, 0xFF8000), (2000, 0xFFFF00), (1600, 0x0000FF), (1200, 0x00C0C0), (800, 0x008000), (400, 0x804000)]
-        for threshold, color in colors:
-            if r >= threshold: return color
-        return 0x808080
+    if not embeds:
+        return await interaction.followup.send("データの取得に失敗しました。")
 
-    # フッター用日時（曜日付き）
-    wd_ja = ["月", "火", "水", "木", "金", "土", "日"]
-    now = datetime.now(JST)
-    date_str = now.strftime(f'%Y年%m月%d日({wd_ja[now.weekday()]}) %H:%M')
+    await interaction.followup.send(embeds=embeds)
 
-    embed = discord.Embed(color=get_color(d["rating"]))
-    
-    # 【変更点】ヘッダーにAtCoderリンクを重ねる
-    embed.set_author(
-        name=f"{target.name} / {d['atcoder_id']}", 
-        url=f"https://atcoder.jp/users/{d['atcoder_id']}", 
-        icon_url=target.display_avatar.url
-    )
-
-    embed.add_field(
-        name="📊 現在のステータス",
-        value=(f"**現在のレーティング:** `{d['rating']}` (前回比: {d['diff']})\n"
-               f"**最高レーティング:** `{d['max_rating']}`\n"
-               f"**出場数:** {d['contest_count']} 回 / **所属:** {d['org']}\n"
-               f"**誕生年:** {d['birth']}\n"
-               f"**最終参加:** {d['last_date']}\n└ *{d['last_contest']}*"),
-        inline=False
-    )
-
-    if d["history"]:
-        h_lines = [f"**{h['name']}** ({h['date']}) パフォーマンス: **{h['perf']}** → 新レート: **{h['rate']}**" for h in d["history"]]
-        embed.add_field(name="🏆 直近のコンテスト成績", value="\n".join(h_lines), inline=False)
-
-    # 【変更点】フッターに日時と曜日
-    embed.set_footer(text=f"{date_str} 時点")
-    
-    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="preview", description="各種通知のプレビュー")
 @app_commands.choices(type=[
