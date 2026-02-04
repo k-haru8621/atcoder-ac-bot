@@ -155,12 +155,15 @@ class AtCoderBot(discord.Client):
                                     data["org"] = val
                                 if "Rating最高値" in label: 
                                     if val != "---":
-                                        # 正規表現で数字(グループ1)とそれ以外(グループ2)に分ける
+                                        # 数字の部分(154)と、それ以外の部分(10 級)を分離
                                         import re
-                                        m = re.search(r'(\d+)(.*)', val)
-                                        if m:
-                                            # "154 (10 級)" の形に整形
-                                            data["max_rating"] = f"{m.group(1)} ({m.group(2).strip()})"
+                                        # 最初の数字の塊を見つける
+                                        rating_match = re.search(r'\d+', val)
+                                        if rating_match:
+                                            r_val = rating_match.group() # 154
+                                            # 全体から154を消した残りが「級」の部分
+                                            rank_val = val.replace(r_val, "").strip()
+                                            data["max_rating"] = f"{r_val} ({rank_val})"
                                         else:
                                             data["max_rating"] = val
                                     else:
