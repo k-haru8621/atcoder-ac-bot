@@ -479,8 +479,10 @@ async def preview(interaction: discord.Interaction, type: str):
         elif type == "c30": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details)
         elif type == "cstart": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details, is_start=True)
         elif type == "cend": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details)
+        msg = f"**Preview: {type}**"
         
-        await interaction.response.send_message(content=f"**Preview: {type}**", embed=e)
+    # 既に一度 response を使っている場合は followup を使う
+    await interaction.followup.send(content=f"**Preview: {type}**", embed=e)
 
 if __name__ == "__main__":
     keep_alive(); bot.run(os.getenv("DISCORD_TOKEN"))
