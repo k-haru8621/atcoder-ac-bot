@@ -131,12 +131,12 @@ class AtCoderBot(discord.Client):
         data = {
             "atcoder_id": atcoder_id, "rating": 0, "max_rating": "---", 
             "diff": "---", "birth": "---", "org": "---", 
-            "last_date": "---", "last_contest": "---", 
-            "contest_count": "---", "history": []
+            "last_date": "---", "last_contest": "---", "last_contest_url": "",
+            "contest_count": "---", "last_rank": "---", "rank_all": "---", "history": []
         }
 
         try:
-            # 先に 1. コンテスト履歴 (JSON) を解析して最新レートを確定させる
+            # 1. コンテスト履歴 (JSON) を先に取得して最新レートと個別順位を確定
             async with session.get(history_url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     h_json = await resp.json()
@@ -145,23 +145,37 @@ class AtCoderBot(discord.Client):
                         latest_5 = rated_only[::-1][:5]
                         for i, h in enumerate(latest_5):
                             dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
-                            full_name = h.get('ContestName', 'Unknown Contest')
-                            # コンテスト名の整形
-                            import re
-                            match = re.search(r'ABC\s*(\d+)|Beginner Contest\s*(\d+)', full_name)
-                            short_name = f"ABC{match.group(1) or match.group(2)}" if match else full_name[:10]
+                            full_name = h.get('ContestName', 'Unknown')
+                            c_id = h.get('ContestScreenName', '').split('.')[0]
                             
-                            data["history"].append({"name": short_name, "date": dt.strftime('%m/%d'), "perf": h.get('Performance', '---'), "rate": h.get('NewRating', '---')})
+                            # コンテスト名の略称ルール (ABC/ARC/AGC/AHC)
+                            import re
+                            if "Beginner Contest" in full_name: name = f"ABC{re.search(r'\d+', full_name).group()}"
+                            elif "Regular Contest" in full_name: name = f"ARC{re.search(r'\d+', full_name).group()}"
+                            elif "Grand Contest" in full_name: name = f"AGC{re.search(r'\d+', full_name).group()}"
+                            elif "Heuristic Contest" in full_name: name = f"AHC{re.search(r'\d+', full_name).group()}"
+                            else: name = full_name[:10]
+
+                            data["history"].append({
+                                "name": name,
+                                "date": dt.strftime('%m/%d'),
+                                "perf": h.get('Performance', '---'),
+                                "rate": h.get('NewRating', '---'),
+                                "rank": h.get('Place', '---'),
+                                "url": f"https://atcoder.jp/contests/{c_id}/standings?watching={atcoder_id}"
+                            })
                             
                             if i == 0:
                                 data["rating"] = h.get('NewRating', 0)
+                                data["last_rank"] = h.get('Place', '---')
                                 data["last_date"] = dt.strftime('%Y/%m/%d')
                                 data["last_contest"] = full_name
+                                data["last_contest_url"] = f"https://atcoder.jp/contests/{c_id}"
                                 if len(rated_only) >= 2:
                                     change = h['NewRating'] - rated_only[-2]['NewRating']
                                     data["diff"] = f"{'+' if change > 0 else ''}{change}"
 
-            # 次に 2. プロフィールページの解析 (基本情報)
+            # 2. プロフィールページの解析 (順位 5486th と 最高レート 1495 を取得)
             async with session.get(profile_url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     soup = BeautifulSoup(await resp.text(), 'html.parser')
@@ -171,36 +185,26 @@ class AtCoderBot(discord.Client):
                             td = row.find('td')
                             if th and td:
                                 label = th.get_text(strip=True)
-                                val = td.get_text(strip=True).replace('―', '').strip()
-                                if not val: val = "---"
+                                # ★重要: get_text(" ") でタグ間にスペースを入れ、数字の合体を防ぐ
+                                val = td.get_text(" ", strip=True).replace('―', '').strip()
                                 
+                                if "順位" in label and "位" not in label:
+                                    data["rank_all"] = val # ここで 5486th を取得
                                 if "誕生年" in label: data["birth"] = val
                                 if "所属" in label: data["org"] = val
                                 if "コンテスト参加回数" in label: data["contest_count"] = val
                                 
                                 if "Rating最高値" in label:
                                     if val != "---":
-                                        # あなたの考えた「桁数で分ける」ロジック
                                         import re
-                                        all_nums = "".join(re.findall(r'\d+', val))
-                                        r_count = len(str(data["rating"]))
-                                        
-                                        if r_count > 0 and len(all_nums) > r_count:
-                                            r_val = all_nums[:r_count]
-                                            rank_num = all_nums[r_count:]
-                                            unit = "級" if "級" in val else "段" if "段" in val else ""
-                                            data["max_rating"] = f"{r_val} ({rank_num} {unit})"
-                                        else:
-                                            # 安全策
-                                            r_match = re.search(r'\d+', val)
-                                            if r_match:
-                                                r_val = r_match.group()
-                                                rank_val = val.replace(r_val, "").strip()
-                                                data["max_rating"] = f"{r_val} ({rank_val})"
-                                            else:
-                                                data["max_rating"] = val
+                                        parts = val.split()
+                                        if parts:
+                                            # 最初の塊が 1495、それ以降が級や昇格情報
+                                            max_r = parts[0]
+                                            detail = " ".join(parts[1:])
+                                            data["max_rating"] = f"{max_r} ({detail})"
                                     else:
-                                        data["max_rating"] = val
+                                        data["max_rating"] = "---"
             return data
         except Exception as e:
             print(f"Fetch Error: {e}")
