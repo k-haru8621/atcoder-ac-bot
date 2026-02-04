@@ -28,15 +28,22 @@ EMOJI_MAP = {
     "MLE": "<:atcoder_bot_MLE:1463065831763349514>"
 }
 
-def get_rated_color(rating_str):
-    if "All" in rating_str: return 0xFF0000 
-    match = re.search(r'(\d+)', rating_str)
-    if not match: return 0x000000 
-    val = int(match.group(1))
-    if val < 1200: return 0x008000
-    if val < 2000: return 0x0000FF
-    if val < 2800: return 0xFF8000
-    return 0xFF0000
+def get_rated_color(self, rated_str):
+        """レーティング上限に基づいた色を返す"""
+        if not rated_str or "Unrated" in rated_str:
+            return 0x808080  # 灰色
+        if "All" in rated_str:
+            return 0xFF0000  # 赤
+        
+        # 「~ 1999」から 1999 を抽出
+        match = re.search(r'(\d+)', rated_str)
+        if not match: return 0x808080
+        
+        val = int(match.group(1))
+        if val < 1200: return 0x008000 # 緑
+        if val < 2000: return 0x0000FF # 青
+        if val < 2800: return 0xFF8000 # 橙
+        return 0xFF0000 # 赤
 
 class AtCoderBot(discord.Client):
     def __init__(self):
@@ -203,58 +210,44 @@ class AtCoderBot(discord.Client):
         embed.set_footer(text=f"提出時刻 : {dt.strftime('%b %d, %Y (%a) %H:%M:%S')}")
         await channel.send(embed=embed)
 
-    async def fetch_recent_announcements(self, session, log_channel=None):
+    async def fetch_recent_announcements(self, session):
         results = {}
         try:
+            # 日本語ページを強制
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
-                html = await resp.text()
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
             
-            # 生のHTMLをデコードして、人間が見ている状態と同じにする
-            import html as html_parser
-            decoded = html_parser.unescape(html)
-            soup = BeautifulSoup(decoded, 'html.parser')
-            
-            # 本質：この「告知パネル」自体を1つのコンテスト情報として独立して扱う
-            posts = soup.find_all('div', class_='panel-default')
-            
-            for post in posts:
-                # 告知の本文を取得
+            for post in soup.find_all('div', class_='panel-default'):
                 body = post.find('div', class_='panel-body blog-post')
                 if not body: continue
                 
-                # 1. コンテストURLを本文から抽出（紐付けの唯一の真実）
-                # 例: https://atcoder.jp/contests/abc442
+                # コンテストURLの取得と正規化
                 link_tag = body.find('a', href=re.compile(r'https://atcoder\.jp/contests/[^" \n]+'))
                 if not link_tag: continue
                 c_url = link_tag['href'].split('?')[0].rstrip('/')
                 
-                # 2. 本文をテキスト化し、構造的にデータを抜き出す
-                content = body.get_text("\n")
-                
-                info = {
-                    "name": link_tag.get_text().strip(), # 告知内のコンテスト名
-                    "writer": "不明",
-                    "tester": "不明",
-                    "points": "未発表",
-                    "start_time": None
-                }
+                info = {"writer": "不明", "tester": "不明", "points": "未発表"}
 
-                # 本質：提示されたソースの各行（- Writer: 等）を忠実にパース
-                for line in content.split("\n"):
-                    line = line.strip()
-                    if "Writer：" in line:
-                        info["writer"] = line.replace("- Writer：", "").strip()
-                    elif "Tester：" in line:
-                        info["tester"] = line.replace("- Tester：", "").strip()
-                    elif "配点：" in line:
-                        info["points"] = line.replace("- 配点：", "").strip()
+                # 名前を抽出する専用ロジック (aタグの中身を拾う)
+                def extract_users(keyword):
+                    target = body.find(string=re.compile(keyword))
+                    if not target: return None
+                    # キーワードの親要素から /users/ リンクを持つaタグをすべて取得
+                    links = target.parent.find_all('a', href=re.compile(r'/users/'))
+                    return ", ".join([u.get_text(strip=True) for u in links]) if links else None
+
+                info["writer"] = extract_users("Writer") or "不明"
+                info["tester"] = extract_users("Tester") or "不明"
+
+                # 配点のパース (テキストから取得)
+                content_text = body.get_text("|", strip=True)
+                for line in content_text.split("|"):
+                    if "配点：" in line or "配点:" in line:
+                        info["points"] = line.split("：")[-1].split(":")[-1].strip()
                 
                 results[c_url] = info
-
-            if log_channel:
-                await log_channel.send(f"✅ 真の解析完了: {len(results)}件の告知を完全捕捉")
         except Exception as e:
-            if log_channel: await log_channel.send(f"⚠️ 解析エラー: {e}")
+            print(f"⚠️ 告知解析エラー: {e}")
         return results
         
     async def broadcast_contest(self, name, url, st, dur, rated, label, details, is_10min=False, is_start=False, is_end=False):
@@ -267,35 +260,25 @@ class AtCoderBot(discord.Client):
             channel = self.get_channel(cid)
             if channel: await channel.send(content=f"**{label}**", embed=embed)
 
-    def create_contest_embed(self, name, url, st, dur, rated, details, is_10min=False, is_start=False, is_end=False):
-        # 本質：どんなデータが来ても「文字」として成立させる
-        def clean(text):
-            if not text: return "不明"
-            # 残っているHTMLタグを完全に排除
-            res = re.sub(r'<[^>]*>', '', str(text)).strip()
-            return res if res else "不明"
+    def create_contest_embed(self, name, url, st, dur_min, rated, details, is_start=False):
+        color = self.get_rated_color(rated)
+        embed = discord.Embed(title=name, url=url, color=color)
+        unix_time = int(st.timestamp())
 
-        writer = clean(details.get('writer'))
-        tester = clean(details.get('tester'))
-        points = clean(details.get('points'))
-
-        embed = discord.Embed(title=name, url=url, color=get_rated_color(rated))
-        
-        # 本質：Embedの文字数制限と空文字禁止を回避
-        if is_10min:
-            embed.description = f"コンテストまで残り30分！\n👉 [参加登録]({url})\n配点： {points[:1000]}"
-        elif is_start:
-            embed.description = f"🚀 **開始！**\n\n**配点**： {points[:1000]}\n📈 [順位表]({url}/standings)"
+        if is_start:
+            embed.description = f"🚀 **開始しました！**\n\n📈 [順位表]({url}/standings)\n📄 [解説]({url}/editorial)"
         else:
-            # 24時間前/本日開催通知
-            embed.description = (f"開始： {st.strftime('%Y-%m-%d %H:%M')}\n"
-                                 f"時間： {dur} 分\n"
-                                 f"Writer： {writer[:500]}\n"
-                                 f"Tester： {tester[:500]}\n"
-                                 f"Rated： {rated}\n"
-                                 f"配点： {points[:500]}\n"
-                                 f"開始まで： <t:{int(st.timestamp())}:R>")
-        
+            # ご指定のフォーマット
+            embed.description = (
+                f"**コンテストページ：** {url}\n"
+                f"**開始時刻：** {st.strftime('%Y-%m-%d %H:%M')}\n"
+                f"**コンテスト時間：** {dur_min} 分\n"
+                f"**Writer：** {details.get('writer', '不明')}\n"
+                f"**Tester：** {details.get('tester', '不明')}\n"
+                f"**レーティング変化：** {rated}\n"
+                f"**配点：** {details.get('points', '未発表')}\n"
+                f"**コンテスト開始まで：** <t:{unix_time}:R>"
+            )
         embed.set_footer(text=f"AtCoder - {st.strftime('%Y/%m/%d')}")
         return embed
 
@@ -357,47 +340,75 @@ class AtCoderBot(discord.Client):
                 
     @tasks.loop(minutes=1)
     async def auto_contest_scheduler(self):
+        # 現在時刻を1分単位で取得
         now = datetime.now(JST).replace(second=0, microsecond=0)
+        
         async with aiohttp.ClientSession() as session:
+            # 1. まず告知パネルから Writer/Tester/配点 情報を取得
             recent_details = await self.fetch_recent_announcements(session)
+            
+            # 2. トップページ（日本語）を取得してテーブルを解析
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 if resp.status != 200: return
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
                 
+                # 「今後の予定」と「開催中」のテーブル両方をチェック
                 for table_id in ['contest-table-upcoming', 'contest-table-active']:
                     container = soup.find('div', id=table_id)
                     if not container: continue
-                    table = container.find('table')
-                    if not table: continue
-
-                    for row in table.find_all('tr')[1:]:
+                    
+                    for row in container.find_all('tr')[1:]: # ヘッダーを飛ばす
                         cols = row.find_all('td')
                         if len(cols) < 4: continue
+                        
                         try:
-                            time_tag = row.find('time')
-                            time_str = time_tag.text.replace('\xa0', ' ').strip()
-                            st_dt = datetime.strptime(re.sub(r'\(.*?\)', '', time_str).strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+                            # --- 時刻と時間の解析 ---
+                            time_tag = cols[0].find('time')
+                            if not time_tag: continue
+                            time_str = time_tag.text
+                            # 曜日(Sat)などを除去してパース
+                            clean_time = re.sub(r'\(.*?\)', '', time_str).strip()
+                            st_dt = datetime.strptime(clean_time, '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
                             
-                            dur = cols[2].text.strip()
-                            h, m = map(int, dur.split(':'))
-                            en_dt = st_dt + timedelta(hours=h, minutes=m)
+                            # コンテスト時間（例: 01:40 -> 100分）を計算
+                            dur_str = cols[2].text.strip()
+                            h, m = map(int, dur_str.split(':'))
+                            duration_min = h * 60 + m
+                            en_dt = st_dt + timedelta(minutes=duration_min)
                             
-                            # 判定の安定化：roundを使用して微小なズレを許容
-                            diff_st = round((st_dt - now).total_seconds() / 60)
-                            diff_en = round((en_dt - now).total_seconds() / 60)
-                            
+                            # --- URLと詳細情報の紐付け ---
                             name_tag = cols[1].find('a')
-                            c_url = "https://atcoder.jp" + name_tag['href'].split('?')[0].rstrip('/')
-                            details = recent_details.get(c_url, {"writer":"不明","tester":"不明","points":"不明"})
+                            if not name_tag: continue
+                            # URLを正規化（末尾のスラッシュを削除して一致率を上げる）
+                            raw_path = name_tag['href'].split('?')[0].rstrip('/')
+                            c_url = f"https://atcoder.jp{raw_path}"
                             
-                            # デバッグログ：必要に応じてコンソール等で確認
-                            # print(f"Check: {name_tag.text} / diff_st: {diff_st}")
+                            # 告知パネルから取った詳細を合体（なければ不明を入れる）
+                            details = recent_details.get(c_url, {"writer": "不明", "tester": "不明", "points": "未発表"})
+                            
+                            # --- 通知判定 ---
+                            diff_st = round((st_dt - now).total_seconds() / 60) # 開始まで
+                            diff_en = round((en_dt - now).total_seconds() / 60) # 終了まで
+                            rated = cols[3].text.strip() # レーティング対象範囲
+                            
+                            # 24時間前
+                            if diff_st == 1440:
+                                await self.broadcast_contest(name_tag.text, c_url, st_dt, duration_min, rated, "⏰ 24時間前", details)
+                            
+                            # 30分前
+                            elif diff_st == 30:
+                                await self.broadcast_contest(name_tag.text, c_url, st_dt, duration_min, rated, "⚠️ 30分前", details)
+                            
+                            # 開始
+                            elif diff_st == 0:
+                                await self.broadcast_contest(name_tag.text, c_url, st_dt, duration_min, rated, "🚀 開始！", details, is_start=True)
+                            
+                            # 終了
+                            elif diff_en == 0:
+                                await self.broadcast_contest(name_tag.text, c_url, st_dt, duration_min, rated, "🏁 終了！", details)
 
-                            if diff_st == 1440: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "⏰ 24時間前", details)
-                            elif diff_st == 30: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "⚠️ 30分前", details, is_10min=True)
-                            elif diff_st == 0: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "🚀 開始！", details, is_start=True)
-                            elif diff_en == 0: await self.broadcast_contest(name_tag.text, c_url, st_dt, dur, cols[3].text.strip(), "🏁 終了！", details, is_end=True)
-                        except:
+                        except Exception as e:
+                            # 1つの行でエラーが出ても他の行の処理を続ける
                             continue
 
 bot = AtCoderBot()
