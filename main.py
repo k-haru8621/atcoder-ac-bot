@@ -122,6 +122,69 @@ class AtCoderBot(discord.Client):
         self.auto_contest_scheduler.start()
         await self.tree.sync()
 
+    # --- AtCoderBotクラス内に追加 ---
+    async def fetch_user_profile(self, session, atcoder_id):
+        """ユーザープロフィールと直近の成績をスクレイピング"""
+        url = f"https://atcoder.jp/users/{atcoder_id}?lang=ja"
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200: return None
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
+
+                data = {
+                    "atcoder_id": atcoder_id,
+                    "rating": "0", "diff": "0", "birth": None, "org": None,
+                    "last_date": "不明", "last_contest": "なし", "history": []
+                }
+
+                # 基本情報の解析 (テーブルから取得)
+                table = soup.find('table', class_='dl-table')
+                if table:
+                    for row in table.find_all('tr'):
+                        label = row.find('th').text.strip()
+                        val = row.find('td').text.strip()
+                        if "誕生年" in label: data["birth"] = val
+                        if "所属" in label: data["org"] = val
+
+                # レーティング情報の解析
+                # ユーザーページ内の現在のレートと、最高/前回の増減を含むスクリプトやテキストを探す
+                rating_tag = soup.find('b', string=re.compile(r'Rating')) # 簡略化のため
+                # 実際には kenkoooo API を併用するか、詳細にパースが必要ですが、
+                # ここでは主要なテーブルから直近5件を取得するロジックを優先します。
+
+                # 直近の成績 (Historyテーブル)
+                history_table = soup.find('table', id='history')
+                if history_table:
+                    rows = history_table.find_all('tr')[1:] # ヘッダー飛ばし
+                    # 最新が下に来ることが多いので、逆順にして直近5件を取得
+                    recent_rows = rows[::-1][:5]
+                    
+                    for i, row in enumerate(recent_rows):
+                        cols = row.find_all('td')
+                        if len(cols) < 5: continue
+                        
+                        date = cols[0].text.strip()
+                        contest_name = cols[1].text.strip()
+                        perf = cols[3].text.strip()
+                        new_rate = cols[4].text.strip()
+
+                        # 1件目（最新）を「最後のコンテスト」として保存
+                        if i == 0:
+                            data["last_date"] = date
+                            data["last_contest"] = contest_name
+                            data["rating"] = new_rate
+                            # 増減のパース (例: 1500 (+10) -> +10 を抽出)
+                            match = re.search(r'\(([-+]\d+)\)', row.text)
+                            data["diff"] = match.group(1) if match else "±0"
+
+                        data["history"].append({
+                            "name": contest_name, "date": date, "perf": perf, "rate": new_rate
+                        })
+                return data
+        except Exception as e:
+            print(f"Fetch Profile Error: {e}")
+            return None
+
     @tasks.loop(minutes=3)
     async def check_submissions(self):
         # セッションをループの外で作成（効率化）
@@ -455,6 +518,64 @@ async def notice_delete(interaction: discord.Interaction):
         del bot.news_config[gid]; bot.save_to_sheets()
         await interaction.followup.send("🗑️ 告知削除。")
     else: await interaction.followup.send("未設定。")
+
+# --- コマンドセクションに追加 ---
+
+@bot.tree.command(name="status", description="AtCoderのユーザー情報を表示します")
+async def status(interaction: discord.Interaction, atcoder_id: str):
+    await interaction.response.defer()
+    
+    async with aiohttp.ClientSession() as session:
+        data = await bot.fetch_user_profile(session, atcoder_id)
+        
+    if not data:
+        await interaction.followup.send("ユーザー情報の取得に失敗しました。IDが正しいか確認してください。")
+        return
+
+    # レーティングに応じた色を取得
+    try:
+        rate_val = int(re.sub(r'\D', '', data["rating"]))
+    except:
+        rate_val = 0
+    
+    # 色判定ロジック
+    def get_rank_color(r):
+        if r >= 2800: return 0xFF0000 # 赤
+        if r >= 2400: return 0xFF8000 # 橙
+        if r >= 2000: return 0xFFFF00 # 黄
+        if r >= 1600: return 0x0000FF # 青
+        if r >= 1200: return 0x00C0C0 # 水
+        if r >= 800: return 0x008000  # 緑
+        if r >= 400: return 0x804000  # 茶
+        return 0x808080 # 灰
+
+    embed = discord.Embed(title=f"AtCoder User Status", color=get_rank_color(rate_val))
+    embed.set_author(name=interaction.user.name, icon_url=interaction.user.display_avatar.url)
+
+    # 基本情報
+    org_info = f"\n**誕生年** : {data['birth']} / **所属** : {data['org']}" if data['birth'] or data['org'] else ""
+    embed.add_field(
+        name="📊 基本情報",
+        value=(f"**ユーザーネーム** : [{data['atcoder_id']}](https://atcoder.jp/users/{data['atcoder_id']}){org_info}\n"
+               f"**現在のレーティング** : `{data['rating']}` (前回比: `{data['diff']}`)\n"
+               f"**最後にコンテストに出た日** : {data['last_date']}\n({data['last_contest']})"),
+        inline=False
+    )
+
+    # 直近5回
+    history_text = ""
+    for h in data["history"]:
+        history_text += f"📅 {h['date']} | **{h['name']}**\n　 パフォ: `{h['perf']}` → 新レート: `{h['rate']}`\n"
+    
+    if not history_text: history_text = "データがありません"
+    
+    embed.add_field(name="📈 直近5回のコンテスト結果", value=history_text, inline=False)
+    
+    # フッター
+    now_str = datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')
+    embed.set_footer(text=f"{now_str} 時点")
+
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="preview", description="各種通知のプレビュー")
 @app_commands.choices(type=[
