@@ -440,7 +440,10 @@ async def notice_set(interaction: discord.Interaction, channel: discord.TextChan
     except: return
     bot.news_config[str(interaction.guild_id)] = channel.id
     bot.save_to_sheets()
-    await interaction.followup.send(f"✅ 告知先を {channel.mention} に設定。")
+    # 最初に「考え中」を消すための応答を返す
+    await interaction.response.send_message(f"告知先を {channel.mention} に設定しました。", ephemeral=True)
+    
+    # その後に重たい処理（check_immediate_announcement）を実行する
     await bot.check_immediate_announcement(channel.id)
 
 @bot.tree.command(name="notice_delete", description="告知削除")
@@ -477,7 +480,7 @@ async def preview(interaction: discord.Interaction, type: str):
         elif type == "cstart": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details, is_start=True)
         elif type == "cend": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details)
         
-        await interaction.channel.send(content=f"**Preview: {type}**", embed=e)
+        await interaction.response.send_message(content=f"**Preview: {type}**", embed=e)
 
 if __name__ == "__main__":
     keep_alive(); bot.run(os.getenv("DISCORD_TOKEN"))
