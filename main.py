@@ -543,7 +543,18 @@ async def status(interaction: discord.Interaction, member: discord.Member = None
     async with aiohttp.ClientSession() as session:
         d = await bot.fetch_user_data(session, atcoder_id)
 
-    if not d: return await interaction.followup.send("データ取得失敗")
+    # ここが重要：d が辞書（dict）でない場合はエラーとして処理する
+    if not isinstance(d, dict):
+        error_text = "データ取得失敗"
+        if isinstance(d, str):
+            if "PROFILE_NOT_FOUND" in d:
+                error_text = f"ユーザー `{atcoder_id}` が見つかりませんでした。IDが正しいか確認してください。"
+            elif "HISTORY_NOT_FOUND" in d:
+                error_text = f"`{atcoder_id}` さんのコンテスト履歴が取得できませんでした。"
+            else:
+                error_text = f"エラーが発生しました: `{d}`"
+        
+        return await interaction.followup.send(f"❌ {error_text}")
 
     # 色判定
     def get_color(r):
