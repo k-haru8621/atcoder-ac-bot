@@ -126,6 +126,7 @@ class AtCoderBot(discord.Client):
     async def fetch_user_data(self, session, atcoder_id):
         profile_url = f"https://atcoder.jp/users/{atcoder_id}?lang=ja"
         history_url = f"https://atcoder.jp/users/{atcoder_id}/history/json"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
         
         data = {
             "atcoder_id": atcoder_id, "rating": 0, "max_rating": "---", 
@@ -134,43 +135,65 @@ class AtCoderBot(discord.Client):
             "contest_count": 0, "history": []
         }
 
+        print(f"--- Log Start: {atcoder_id} ---")
         try:
-            # プロフィールから基本情報と最高レート、出場数を取得
-            async with session.get(profile_url) as resp:
-                if resp.status == 200:
-                    soup = BeautifulSoup(await resp.text(), 'html.parser')
-                    for t in soup.find_all('table', class_='dl-table'):
+            # 1. プロフィールページの解析
+            async with session.get(profile_url, headers=headers, timeout=10) as resp:
+                print(f"Step 1: Profile Access -> Status {resp.status}")
+                if resp.status != 200:
+                    print(f"Error: Profile page not found (ID: {atcoder_id})")
+                    return "ERROR_PROFILE_NOT_FOUND" # 原因を特定できる値を返す
+                
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
+                tables = soup.find_all('table', class_='dl-table')
+                if not tables:
+                    print("Error: Table 'dl-table' not found in profile")
+                else:
+                    for t in tables:
                         for row in t.find_all('tr'):
                             th, td = row.find('th'), row.find('td')
-                            if not th or not td: continue
-                            label, val = th.get_text(strip=True), td.get_text(strip=True).replace('―', '').strip()
-                            if "誕生年" in label and val: data["birth"] = val
-                            if "所属" in label and val: data["org"] = val
-                            if "Rating最高値" in label and val: data["max_rating"] = val
-                            if "コンテスト参加回数" in label and val: data["contest_count"] = val
+                            if th and td:
+                                label, val = th.get_text(strip=True), td.get_text(strip=True).replace('―', '').strip()
+                                if "誕生年" in label and val: data["birth"] = val
+                                if "所属" in label and val: data["org"] = val
+                                if "Rating最高値" in label and val: data["max_rating"] = val
+                                if "コンテスト参加回数" in label and val: data["contest_count"] = val
 
-            # 履歴JSONからパフォーマンスと直近成績を取得
-            async with session.get(history_url) as resp:
-                if resp.status == 200:
-                    h_json = await resp.json()
-                    rated_only = [h for h in h_json if h.get('IsRated')]
-                    if rated_only:
-                        latest_5 = rated_only[::-1][:5]
-                        for i, h in enumerate(latest_5):
-                            dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
-                            full_name = h['ContestNameJa'] or h['ContestName']
-                            # ABC形式に変換
-                            short_name = f"ABC{full_name.split('Beginner Contest')[-1].split()[0]}" if "Beginner Contest" in full_name else full_name[:10]
-                            
-                            data["history"].append({"name": short_name, "date": dt.strftime('%m/%d'), "perf": h['Performance'], "rate": h['NewRating']})
-                            if i == 0:
-                                data["rating"], data["last_date"], data["last_contest"] = h['NewRating'], dt.strftime('%Y/%m/%d'), full_name
-                                if len(rated_only) >= 2:
-                                    change = h['NewRating'] - rated_only[-2]['NewRating']
-                                    data["diff"] = f"{'+' if change > 0 else ''}{change}"
+            # 2. コンテスト履歴の解析
+            async with session.get(history_url, headers=headers, timeout=10) as resp:
+                print(f"Step 2: History Access -> Status {resp.status}")
+                if resp.status != 200:
+                    print(f"Error: History JSON access failed (ID: {atcoder_id})")
+                    return "ERROR_HISTORY_NOT_FOUND"
+                
+                h_json = await resp.json()
+                rated_only = [h for h in h_json if h.get('IsRated')]
+                print(f"Step 3: Rated Contests Found: {len(rated_only)}")
+                
+                if rated_only:
+                    latest_5 = rated_only[::-1][:5]
+                    for i, h in enumerate(latest_5):
+                        dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
+                        full_name = h['ContestNameJa'] or h['ContestName']
+                        short_name = f"ABC{full_name.split('Beginner Contest')[-1].split()[0]}" if "Beginner Contest" in full_name else (full_name[:10] + "...")
+                        
+                        data["history"].append({"name": short_name, "date": dt.strftime('%m/%d'), "perf": h['Performance'], "rate": h['NewRating']})
+                        if i == 0:
+                            data["rating"], data["last_date"], data["last_contest"] = h['NewRating'], dt.strftime('%Y/%m/%d'), full_name
+                            if len(rated_only) >= 2:
+                                change = h['NewRating'] - rated_only[-2]['NewRating']
+                                data["diff"] = f"{'+' if change > 0 else ''}{change}"
+                else:
+                    print("Warning: This user has no rated contests.")
+
+            print(f"--- Log End: Success ---")
             return data
-        except:
-            return None
+
+        except Exception as e:
+            import traceback
+            print(f"--- Log End: Exception Occurred ---")
+            print(traceback.format_exc()) # エラーの詳細な場所をコンソールに出す
+            return f"ERROR_EXCEPTION: {str(e)}"
             
     @tasks.loop(minutes=3)
     async def check_submissions(self):
