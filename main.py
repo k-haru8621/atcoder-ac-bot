@@ -560,32 +560,38 @@ async def notice_delete(interaction: discord.Interaction):
 # --- コマンドセクションに追加 ---
 @bot.tree.command(name="status", description="AtCoderステータスを表示")
 async def status(interaction: discord.Interaction, member: discord.Member = None):
-    await interaction.response.defer()
+    # 【最優先】何よりも先にこれを実行して3秒制限を回避する
+    try:
+        await interaction.response.defer()
+    except discord.errors.NotFound:
+        # すでに有効期限が切れている場合は終了
+        return
+
     target = member or interaction.user
+    
+    # ここからデータ取得（時間のかかる処理）
     atcoder_id = next((v['atcoder_id'] for v in bot.user_data.values() if v['discord_user_id'] == target.id), None)
     
     if not atcoder_id:
         return await interaction.followup.send(f"❌ {target.name} さんのIDが登録されていません。")
 
     async with aiohttp.ClientSession() as session:
-        algo_d = await bot.fetch_user_data(session, atcoder_id, mode='algo')
-        heur_d = await bot.fetch_user_data(session, atcoder_id, mode='heur')
+        # AlgoとHeurを並列で取得して時短する（任意ですが推奨）
+        import asyncio
+        algo_task = bot.fetch_user_data(session, atcoder_id, mode='algo')
+        heur_task = bot.fetch_user_data(session, atcoder_id, mode='heur')
+        algo_d, heur_d = await asyncio.gather(algo_task, heur_task)
 
     embeds = []
     if algo_d: embeds.append(bot.create_status_embed(algo_d, target))
     if heur_d: embeds.append(bot.create_status_embed(heur_d, target))
 
-    if not embeds: return await interaction.followup.send("データの取得に失敗しました。")
+    if not embeds:
+        return await interaction.followup.send("データの取得に失敗しました。")
+        
     await interaction.followup.send(embeds=embeds)
-    
-@bot.tree.command(name="preview", description="各種通知のプレビュー")
-@app_commands.choices(type=[
-    app_commands.Choice(name="提出通知", value="ac"),
-    app_commands.Choice(name="24時間前", value="c24"),
-    app_commands.Choice(name="30分前", value="c30"),
-    app_commands.Choice(name="開始", value="cstart"),
-    app_commands.Choice(name="終了", value="cend")
-])
+
+
 async def preview(interaction: discord.Interaction, type: str):
     try: await interaction.response.defer(ephemeral=True)
     except: return
