@@ -290,7 +290,7 @@ class AtCoderBot(discord.Client):
         
         status_msg = await channel.send(f"⏳ 最終デプロイ確認中... ({now.strftime('%H:%M:%S')})")
         async with aiohttp.ClientSession() as session:
-            recent_details = await self.fetch_recent_announcements(session, channel)
+            recent_details = await self.fetch_recent_announcements(session)
             
             async with session.get("https://atcoder.jp/home?lang=ja") as resp:
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
