@@ -125,69 +125,109 @@ class AtCoderBot(discord.Client):
     # --- AtCoderBotクラス内に追加 ---
     # --- AtCoderBotクラス内の既存のfetch_user_dataをこれに差し替え ---
     async def fetch_user_data(self, session, atcoder_id, mode='algo'):
-        c_type = "heuristic" if mode == 'heur' else "algorithm"
-        profile_url = f"https://atcoder.jp/users/{atcoder_id}?lang=ja&contestType={c_type}"
-        history_url = f"https://atcoder.jp/users/{atcoder_id}/history/json?contestType={c_type}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        
-        data = {
-            "mode": mode, "atcoder_id": atcoder_id, "rating": 0, "max_rating": "---", 
-            "diff": "---", "birth": "---", "org": "---", 
-            "last_date": "---", "last_contest": "---", "last_contest_url": "",
-            "contest_count": "---", "rank_all": "---", "history": []
-        }
+    """
+    AtCoderからユーザーデータを取得する。
+    mode='algo' でアルゴリズム、mode='heur' でヒューリスティック用。
+    """
+    import re
+    from bs4 import BeautifulSoup
 
-        try:
-            async with session.get(history_url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    h_json = await resp.json()
-                    rated_only = [h for h in h_json if h.get('IsRated') or mode == 'heur']
-                    if rated_only:
-                        latest_5 = rated_only[::-1][:5]
-                        for i, h in enumerate(latest_5):
-                            dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
-                            full_name = h.get('ContestName', 'Unknown')
-                            c_id = h.get('ContestScreenName', '').split('.')[0]
-                            # ABC2026回避用の正規表現
-                            m = re.search(r'(ABC|ARC|AGC|AHC)\s*(\d+)', full_name, re.IGNORECASE)
-                            short_name = f"{m.group(1).upper()}{m.group(2)}" if m else full_name[:12]
+    c_type = "heuristic" if mode == 'heur' else "algorithm"
+    profile_url = f"https://atcoder.jp/users/{atcoder_id}?lang=ja&contestType={c_type}"
+    history_url = f"https://atcoder.jp/users/{atcoder_id}/history/json?contestType={c_type}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    data = {
+        "mode": mode, "atcoder_id": atcoder_id, "rating": 0, "max_rating": "---", 
+        "diff": "---", "birth": "---", "org": "---", 
+        "last_date": "---", "last_contest": "---", "last_contest_url": "",
+        "contest_count": "---", "rank_all": "---", "history": []
+    }
 
-                            data["history"].append({
-                                "name": short_name, "date": dt.strftime('%m/%d'),
-                                "perf": h.get('Performance', '---'), "rate": h.get('NewRating', '---'),
-                                "rank": h.get('Place', '---'),
-                                "url": f"https://atcoder.jp/contests/{c_id}/standings?watching={atcoder_id}"
-                            })
-                            if i == 0:
-                                data["rating"] = h.get('NewRating', 0)
-                                data["last_date"] = dt.strftime('%Y/%m/%d')
-                                data["last_contest"] = full_name
-                                data["last_contest_url"] = f"https://atcoder.jp/contests/{c_id}"
-                                if len(rated_only) >= 2:
-                                    change = h['NewRating'] - rated_only[-2]['NewRating']
-                                    data["diff"] = f"{'+' if change > 0 else ''}{change}"
+    try:
+        # 1. 履歴データ (JSON) の取得と解析
+        async with session.get(history_url, headers=headers, timeout=10) as resp:
+            if resp.status == 200:
+                h_json = await resp.json()
+                # Heuristicの場合はIsRated関係なく表示、AlgorithmはRatedのみを考慮
+                rated_only = [h for h in h_json if h.get('IsRated') or mode == 'heur']
+                
+                if rated_only:
+                    # 直近5件を逆順（新しい順）で取得
+                    latest_5 = rated_only[::-1][:5]
+                    for i, h in enumerate(latest_5):
+                        dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
+                        full_name = h.get('ContestName', 'Unknown')
+                        c_id = h.get('ContestScreenName', '').split('.')[0]
+                        
+                        # --- 短縮名のロジック ---
+                        # "AtCoder Beginner Contest 441" から "ABC441" を作る
+                        # 2026年などの西暦に釣られないよう、回数部分(1〜3桁)を狙い撃ち
+                        m = re.search(r'AtCoder\s+(Beginner|Regular|Grand|Heuristic)\s+Contest\s+(\d+)', full_name, re.IGNORECASE)
+                        if m:
+                            type_char = m.group(1)[0].upper()
+                            short_name = f"A{type_char}C{m.group(2)}"
+                        else:
+                            # 企業コンテスト等の場合
+                            short_name = (full_name[:12] + '..') if len(full_name) > 12 else full_name
 
-            async with session.get(profile_url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    soup = BeautifulSoup(await resp.text(), 'html.parser')
-                    for t in soup.find_all('table', class_='dl-table'):
-                        for row in t.find_all('tr'):
-                            th, td = row.find('th'), row.find('td')
-                            if th and td:
-                                label = th.get_text(strip=True)
-                                val = td.get_text(" ", strip=True).replace('―', '').strip()
-                                if "順位" in label and "位" not in label: data["rank_all"] = val
-                                elif "誕生年" in label: data["birth"] = val
-                                elif "所属" in label: data["org"] = val
-                                elif "コンテスト参加回数" in label: data["contest_count"] = val
-                                elif "Rating最高値" in label:
-                                    if val == "---": data["max_rating"] = "---"
-                                    else:
-                                        parts = val.split()
-                                        if mode == 'heur' or len(parts) == 1: data["max_rating"] = parts[0]
-                                        else: data["max_rating"] = f"{parts[0]} ({' '.join(parts[1:])})"
-            return data
-        except: return None
+                        data["history"].append({
+                            "name": short_name,
+                            "date": dt.strftime('%m/%d'),
+                            "perf": h.get('Performance', '---'),
+                            "rate": h.get('NewRating', '---'),
+                            "rank": h.get('Place', '---'),
+                            "url": f"https://atcoder.jp/contests/{c_id}/standings?watching={atcoder_id}"
+                        })
+                        
+                        # 一番新しいコンテスト (i=0) の情報を「現在のステータス」用に使用
+                        if i == 0:
+                            data["rating"] = h.get('NewRating', 0)
+                            data["last_date"] = dt.strftime('%Y/%m/%d')
+                            # ここは「フルネーム」をそのまま保持
+                            data["last_contest"] = full_name
+                            data["last_contest_url"] = f"https://atcoder.jp/contests/{c_id}"
+                            
+                            # 前回比の計算
+                            if len(rated_only) >= 2:
+                                change = h['NewRating'] - rated_only[-2]['NewRating']
+                                data["diff"] = f"{'+' if change > 0 else ''}{change}"
+
+        # 2. プロフィールページ (HTML) の解析
+        async with session.get(profile_url, headers=headers, timeout=10) as resp:
+            if resp.status == 200:
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
+                # ユーザー情報のテーブルを全スキャン
+                for row in soup.find_all('tr'):
+                    th = row.find('th')
+                    td = row.find('td')
+                    if not th or not td: continue
+                    
+                    label = th.get_text(strip=True)
+                    val = td.get_text(" ", strip=True).replace('―', '').strip()
+                    
+                    # 各種項目のマッピング
+                    if label == "順位":
+                        data["rank_all"] = val
+                    elif "最高値" in label or "最高Rating" in label:
+                        parts = val.split()
+                        # Heuristic または 級が存在しない場合
+                        if mode == 'heur' or len(parts) == 1:
+                            data["max_rating"] = parts[0]
+                        else:
+                            # Algorithmかつ「級」が存在する場合
+                            data["max_rating"] = f"{parts[0]} ({' '.join(parts[1:])})"
+                    elif "参加回数" in label:
+                        data["contest_count"] = val
+                    elif "所属" in label:
+                        data["org"] = val
+                    elif "誕生年" in label:
+                        data["birth"] = val
+
+        return data
+    except Exception as e:
+        print(f"Error fetching {mode} data for {atcoder_id}: {e}")
+        return None
             
     @tasks.loop(minutes=3)
     async def check_submissions(self):
