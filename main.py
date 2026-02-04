@@ -134,11 +134,10 @@ class AtCoderBot(discord.Client):
             "mode": mode, "atcoder_id": atcoder_id, "rating": 0, "max_rating": "---", 
             "diff": "---", "birth": "---", "org": "---", 
             "last_date": "---", "last_contest": "---", "last_contest_url": "",
-            "contest_count": "---", "last_rank": "---", "rank_all": "---", "history": []
+            "contest_count": "---", "rank_all": "---", "history": []
         }
 
         try:
-            # 1. 履歴データの取得
             async with session.get(history_url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     h_json = await resp.json()
@@ -149,22 +148,18 @@ class AtCoderBot(discord.Client):
                             dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
                             full_name = h.get('ContestName', 'Unknown')
                             c_id = h.get('ContestScreenName', '').split('.')[0]
-                            
-                            # 【修正】正規表現でABC2026問題を回避
+                            # ABC2026回避用の正規表現
                             m = re.search(r'(ABC|ARC|AGC|AHC)\s*(\d+)', full_name, re.IGNORECASE)
-                            name = f"{m.group(1).upper()}{m.group(2)}" if m else full_name[:12]
+                            short_name = f"{m.group(1).upper()}{m.group(2)}" if m else full_name[:12]
 
                             data["history"].append({
-                                "name": name, "date": dt.strftime('%m/%d'),
-                                "perf": h.get('Performance', '---'),
-                                "rate": h.get('NewRating', '---'),
+                                "name": short_name, "date": dt.strftime('%m/%d'),
+                                "perf": h.get('Performance', '---'), "rate": h.get('NewRating', '---'),
                                 "rank": h.get('Place', '---'),
                                 "url": f"https://atcoder.jp/contests/{c_id}/standings?watching={atcoder_id}"
                             })
-                            
                             if i == 0:
                                 data["rating"] = h.get('NewRating', 0)
-                                data["last_rank"] = h.get('Place', '---')
                                 data["last_date"] = dt.strftime('%Y/%m/%d')
                                 data["last_contest"] = full_name
                                 data["last_contest_url"] = f"https://atcoder.jp/contests/{c_id}"
@@ -172,7 +167,6 @@ class AtCoderBot(discord.Client):
                                     change = h['NewRating'] - rated_only[-2]['NewRating']
                                     data["diff"] = f"{'+' if change > 0 else ''}{change}"
 
-            # 2. プロフィールデータの解析
             async with session.get(profile_url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     soup = BeautifulSoup(await resp.text(), 'html.parser')
@@ -183,12 +177,15 @@ class AtCoderBot(discord.Client):
                                 label = th.get_text(strip=True)
                                 val = td.get_text(" ", strip=True).replace('―', '').strip()
                                 if "順位" in label and "位" not in label: data["rank_all"] = val
-                                if "誕生年" in label: data["birth"] = val
-                                if "所属" in label: data["org"] = val
-                                if "コンテスト参加回数" in label: data["contest_count"] = val
-                                if "Rating最高値" in label:
-                                    parts = val.split()
-                                    if parts: data["max_rating"] = f"{parts[0]} ({' '.join(parts[1:])})"
+                                elif "誕生年" in label: data["birth"] = val
+                                elif "所属" in label: data["org"] = val
+                                elif "コンテスト参加回数" in label: data["contest_count"] = val
+                                elif "Rating最高値" in label:
+                                    if val == "---": data["max_rating"] = "---"
+                                    else:
+                                        parts = val.split()
+                                        if mode == 'heur' or len(parts) == 1: data["max_rating"] = parts[0]
+                                        else: data["max_rating"] = f"{parts[0]} ({' '.join(parts[1:])})"
             return data
         except: return None
             
@@ -332,9 +329,7 @@ class AtCoderBot(discord.Client):
             if channel: await channel.send(content=f"**{label}**", embed=embed)
                 
     def create_status_embed(self, d, target):
-        """データ辞書dからDiscord Embedを作成する"""
         mode_label = "Algorithm" if d['mode'] == 'algo' else "Heuristic"
-        # 既存のget_rated_colorはコンテスト用なので、レート用の色判定
         def get_color(r):
             colors = [(2800, 0xFF0000), (2400, 0xFF8000), (2000, 0xFFFF00), (1600, 0x0000FF), (1200, 0x00C0C0), (800, 0x008000), (400, 0x804000)]
             for threshold, color in colors:
@@ -342,26 +337,23 @@ class AtCoderBot(discord.Client):
             return 0x808080
 
         embed = discord.Embed(color=get_color(d["rating"]))
-        embed.set_author(
-            name=f"{target.name} / {d['atcoder_id']} ({mode_label})", 
-            url=f"https://atcoder.jp/users/{d['atcoder_id']}?contestType={'heuristic' if d['mode'] == 'heur' else 'algorithm'}",
-            icon_url=target.display_avatar.url
-        )
+        profile_url = f"https://atcoder.jp/users/{d['atcoder_id']}?contestType={'heuristic' if d['mode'] == 'heur' else 'algorithm'}"
+        
+        # [アイコン] Discord名 / AtCoderID (Mode)
+        embed.set_author(name=f"{target.display_name} / {d['atcoder_id']} ({mode_label})", url=profile_url, icon_url=target.display_avatar.url)
 
-        embed.add_field(
-            name="📊 現在のステータス",
-            value=(f"**現在の順位:** `{d['rank_all']}`\n"
-                   f"**現在のレーティング:** `{d['rating']}` (前回比: {d['diff']})\n"
-                   f"**最高レーティング:** `{d['max_rating']}`\n"
-                   f"**出場数:** {d['contest_count']} / **所属:** {d['org']}\n"
-                   f"**誕生年:** {d['birth']}\n"
-                   f"**最終参加:** {d['last_date']}\n"
-                   f"└ [{d['last_contest']}]({d['last_contest_url']})"), # リンク化
-            inline=False
+        status_value = (
+            f"**現在の順位:** `{d['rank_all']}`\n"
+            f"**現在のレーティング:** `{d['rating']}` (前回比: {d['diff']})\n"
+            f"**最高レーティング:** `{d['max_rating']}`\n"
+            f"**出場数:** {d['contest_count']} / **所属:** {d['org']}\n"
+            f"**誕生年:** {d['birth']}\n"
+            f"**最終参加:** {d['last_date']}\n"
+            f"└ [{d['last_contest']}]({d['last_contest_url']})"
         )
+        embed.add_field(name="📊 現在のステータス", value=status_value, inline=False)
 
         if d["history"]:
-            # 各履歴の「n位」を順位表リンクにする
             h_lines = [f"**{h['name']}** ({h['date']}) Perf: **{h['perf']}** → Rate: **{h['rate']}** ([{h['rank']}位]({h['url']}))" for h in d["history"]]
             embed.add_field(name="🏆 直近のコンテスト成績", value="\n".join(h_lines), inline=False)
 
@@ -570,28 +562,22 @@ async def notice_delete(interaction: discord.Interaction):
 async def status(interaction: discord.Interaction, member: discord.Member = None):
     await interaction.response.defer()
     target = member or interaction.user
-    
     atcoder_id = next((v['atcoder_id'] for v in bot.user_data.values() if v['discord_user_id'] == target.id), None)
+    
     if not atcoder_id:
         return await interaction.followup.send(f"❌ {target.name} さんのIDが登録されていません。")
 
     async with aiohttp.ClientSession() as session:
-        # Algorithm と Heuristic 両方取得
         algo_d = await bot.fetch_user_data(session, atcoder_id, mode='algo')
         heur_d = await bot.fetch_user_data(session, atcoder_id, mode='heur')
 
     embeds = []
-    if algo_d:
-        embeds.append(bot.create_status_embed(algo_d, target))
-    if heur_d:
-        embeds.append(bot.create_status_embed(heur_d, target))
+    if algo_d: embeds.append(bot.create_status_embed(algo_d, target))
+    if heur_d: embeds.append(bot.create_status_embed(heur_d, target))
 
-    if not embeds:
-        return await interaction.followup.send("データの取得に失敗しました。")
-
+    if not embeds: return await interaction.followup.send("データの取得に失敗しました。")
     await interaction.followup.send(embeds=embeds)
-
-
+    
 @bot.tree.command(name="preview", description="各種通知のプレビュー")
 @app_commands.choices(type=[
     app_commands.Choice(name="提出通知", value="ac"),
