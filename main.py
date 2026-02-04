@@ -28,22 +28,6 @@ EMOJI_MAP = {
     "MLE": "<:atcoder_bot_MLE:1463065831763349514>"
 }
 
-def get_rated_color(self, rated_str):
-        """レーティング上限に基づいた色を返す"""
-        if not rated_str or "Unrated" in rated_str:
-            return 0x808080  # 灰色
-        if "All" in rated_str:
-            return 0xFF0000  # 赤
-        
-        # 「~ 1999」から 1999 を抽出
-        match = re.search(r'(\d+)', rated_str)
-        if not match: return 0x808080
-        
-        val = int(match.group(1))
-        if val < 1200: return 0x008000 # 緑
-        if val < 2000: return 0x0000FF # 青
-        if val < 2800: return 0xFF8000 # 橙
-        return 0xFF0000 # 赤
 
 class AtCoderBot(discord.Client):
     def __init__(self):
@@ -63,6 +47,23 @@ class AtCoderBot(discord.Client):
             self.gc = gspread.authorize(creds)
             self.sheet = self.gc.open(SHEET_NAME)
         except Exception as e: print(f"⚠️ Sheetsエラー: {e}")
+            
+    def get_rated_color(self, rated_str):
+        """レーティング上限に基づいた色を返す"""
+        if not rated_str or "Unrated" in rated_str:
+            return 0x808080  # 灰色
+        if "All" in rated_str:
+            return 0xFF0000  # 赤
+        
+        # 「~ 1999」から 1999 を抽出
+        match = re.search(r'(\d+)', rated_str)
+        if not match: return 0x808080
+        
+        val = int(match.group(1))
+        if val < 1200: return 0x008000 # 緑
+        if val < 2000: return 0x0000FF # 青
+        if val < 2800: return 0xFF8000 # 橙
+        return 0xFF0000 # 赤
 
     def save_to_sheets(self):
         try:
@@ -261,6 +262,7 @@ class AtCoderBot(discord.Client):
             if channel: await channel.send(content=f"**{label}**", embed=embed)
 
     def create_contest_embed(self, name, url, st, dur_min, rated, details, is_start=False):
+        # self.get_rated_color を呼び出すように変更
         color = self.get_rated_color(rated)
         embed = discord.Embed(title=name, url=url, color=color)
         unix_time = int(st.timestamp())
@@ -268,7 +270,6 @@ class AtCoderBot(discord.Client):
         if is_start:
             embed.description = f"🚀 **開始しました！**\n\n📈 [順位表]({url}/standings)\n📄 [解説]({url}/editorial)"
         else:
-            # ご指定のフォーマット
             embed.description = (
                 f"**コンテストページ：** {url}\n"
                 f"**開始時刻：** {st.strftime('%Y-%m-%d %H:%M')}\n"
@@ -281,7 +282,7 @@ class AtCoderBot(discord.Client):
             )
         embed.set_footer(text=f"AtCoder - {st.strftime('%Y/%m/%d')}")
         return embed
-
+        
     async def check_immediate_announcement(self, channel_id):
         now = datetime.now(JST)
         channel = self.get_channel(channel_id)
@@ -469,12 +470,14 @@ async def preview(interaction: discord.Interaction, type: str):
     if type == "ac":
         await bot.send_ac_notification({'atcoder_id': 'atcoder', 'discord_user_id': interaction.user.id, 'channel_id': interaction.channel_id}, {'id': 0, 'problem_id': 'abc_a', 'contest_id': 'abc', 'result': 'AC', 'point': 100, 'language': 'Python', 'epoch_second': int(datetime.now().timestamp())})
     else:
-        if type == "c24": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, "01:40", "All", dummy_details)
-        elif type == "c30": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, "01:40", "All", dummy_details, is_10min=True)
-        elif type == "cstart": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, "01:40", "All", dummy_details, is_start=True)
-        elif type == "cend": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, "01:40", "All", dummy_details, is_end=True)
-        await interaction.channel.send(content="**Preview**", embed=e)
-    await interaction.followup.send("✅ 送信。")
+        # 時間を "01:40" (文字列) から 100 (数値) に変更
+        # かつ、不要な引数 (is_10min等) を削除
+        if type == "c24": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details)
+        elif type == "c30": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details)
+        elif type == "cstart": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details, is_start=True)
+        elif type == "cend": e = bot.create_contest_embed("Preview", dummy_url, dummy_st, 100, "All", dummy_details)
+        
+        await interaction.channel.send(content=f"**Preview: {type}**", embed=e)
 
 if __name__ == "__main__":
     keep_alive(); bot.run(os.getenv("DISCORD_TOKEN"))
