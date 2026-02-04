@@ -136,7 +136,32 @@ class AtCoderBot(discord.Client):
         }
 
         try:
-            # 1. プロフィールページの解析 (基本情報)
+            # 先に 1. コンテスト履歴 (JSON) を解析して最新レートを確定させる
+            async with session.get(history_url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    h_json = await resp.json()
+                    rated_only = [h for h in h_json if h.get('IsRated')]
+                    if rated_only:
+                        latest_5 = rated_only[::-1][:5]
+                        for i, h in enumerate(latest_5):
+                            dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
+                            full_name = h.get('ContestName', 'Unknown Contest')
+                            # コンテスト名の整形
+                            import re
+                            match = re.search(r'ABC\s*(\d+)|Beginner Contest\s*(\d+)', full_name)
+                            short_name = f"ABC{match.group(1) or match.group(2)}" if match else full_name[:10]
+                            
+                            data["history"].append({"name": short_name, "date": dt.strftime('%m/%d'), "perf": h.get('Performance', '---'), "rate": h.get('NewRating', '---')})
+                            
+                            if i == 0:
+                                data["rating"] = h.get('NewRating', 0)
+                                data["last_date"] = dt.strftime('%Y/%m/%d')
+                                data["last_contest"] = full_name
+                                if len(rated_only) >= 2:
+                                    change = h['NewRating'] - rated_only[-2]['NewRating']
+                                    data["diff"] = f"{'+' if change > 0 else ''}{change}"
+
+            # 次に 2. プロフィールページの解析 (基本情報)
             async with session.get(profile_url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     soup = BeautifulSoup(await resp.text(), 'html.parser')
@@ -149,64 +174,33 @@ class AtCoderBot(discord.Client):
                                 val = td.get_text(strip=True).replace('―', '').strip()
                                 if not val: val = "---"
                                 
-                                if "誕生年" in label: 
-                                    data["birth"] = val
-                                if "所属" in label: 
-                                    data["org"] = val
-                                if "Rating最高値" in label: 
+                                if "誕生年" in label: data["birth"] = val
+                                if "所属" in label: data["org"] = val
+                                if "コンテスト参加回数" in label: data["contest_count"] = val
+                                
+                                if "Rating最高値" in label:
                                     if val != "---":
-                                        # 数字の部分(154)と、それ以外の部分(10 級)を分離
+                                        # あなたの考えた「桁数で分ける」ロジック
                                         import re
-                                        # 最初の数字の塊を見つける
-                                        rating_match = re.search(r'\d+', val)
-                                        if rating_match:
-                                            r_val = rating_match.group() # 154
-                                            # 全体から154を消した残りが「級」の部分
-                                            rank_val = val.replace(r_val, "").strip()
-                                            data["max_rating"] = f"{r_val} ({rank_val})"
+                                        all_nums = "".join(re.findall(r'\d+', val))
+                                        r_count = len(str(data["rating"]))
+                                        
+                                        if r_count > 0 and len(all_nums) > r_count:
+                                            r_val = all_nums[:r_count]
+                                            rank_num = all_nums[r_count:]
+                                            unit = "級" if "級" in val else "段" if "段" in val else ""
+                                            data["max_rating"] = f"{r_val} ({rank_num} {unit})"
                                         else:
-                                            data["max_rating"] = val
+                                            # 安全策
+                                            r_match = re.search(r'\d+', val)
+                                            if r_match:
+                                                r_val = r_match.group()
+                                                rank_val = val.replace(r_val, "").strip()
+                                                data["max_rating"] = f"{r_val} ({rank_val})"
+                                            else:
+                                                data["max_rating"] = val
                                     else:
                                         data["max_rating"] = val
-                                if "コンテスト参加回数" in label: 
-                                    data["contest_count"] = val
-
-            # 2. コンテスト履歴 (JSON) の解析
-            async with session.get(history_url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    h_json = await resp.json()
-                    rated_only = [h for h in h_json if h.get('IsRated')]
-                    
-                    if rated_only:
-                        latest_5 = rated_only[::-1][:5]
-                        for i, h in enumerate(latest_5):
-                            dt = datetime.fromisoformat(h['EndTime']).astimezone(JST)
-                            # ★ここで ContestNameJa ではなく ContestName を使うように修正
-                            full_name = h.get('ContestName', 'Unknown Contest')
-                            
-                            # ABC形式への整形
-                            import re
-                            match = re.search(r'ABC\s*(\d+)|Beginner Contest\s*(\d+)', full_name)
-                            if match:
-                                num = match.group(1) or match.group(2)
-                                short_name = f"ABC{num}"
-                            else:
-                                short_name = full_name[:10]
-
-                            data["history"].append({
-                                "name": short_name, 
-                                "date": dt.strftime('%m/%d'), 
-                                "perf": h.get('Performance', '---'), 
-                                "rate": h.get('NewRating', '---')
-                            })
-                            
-                            if i == 0:
-                                data["rating"] = h.get('NewRating', 0)
-                                data["last_date"] = dt.strftime('%Y/%m/%d')
-                                data["last_contest"] = full_name
-                                if len(rated_only) >= 2:
-                                    change = h['NewRating'] - rated_only[-2]['NewRating']
-                                    data["diff"] = f"{'+' if change > 0 else ''}{change}"
             return data
         except Exception as e:
             print(f"Fetch Error: {e}")
