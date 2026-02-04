@@ -148,10 +148,25 @@ class AtCoderBot(discord.Client):
                                 label = th.get_text(strip=True)
                                 val = td.get_text(strip=True).replace('―', '').strip()
                                 if not val: val = "---"
-                                if "誕生年" in label: data["birth"] = val
-                                if "所属" in label: data["org"] = val
-                                if "Rating最高値" in label: data["max_rating"] = val
-                                if "コンテスト参加回数" in label: data["contest_count"] = val
+                                
+                                if "誕生年" in label: 
+                                    data["birth"] = val
+                                if "所属" in label: 
+                                    data["org"] = val
+                                if "Rating最高値" in label: 
+                                    if val != "---":
+                                        # 正規表現で数字(グループ1)とそれ以外(グループ2)に分ける
+                                        import re
+                                        m = re.search(r'(\d+)(.*)', val)
+                                        if m:
+                                            # "154 (10 級)" の形に整形
+                                            data["max_rating"] = f"{m.group(1)} ({m.group(2).strip()})"
+                                        else:
+                                            data["max_rating"] = val
+                                    else:
+                                        data["max_rating"] = val
+                                if "コンテスト参加回数" in label: 
+                                    data["contest_count"] = val
 
             # 2. コンテスト履歴 (JSON) の解析
             async with session.get(history_url, headers=headers, timeout=10) as resp:
