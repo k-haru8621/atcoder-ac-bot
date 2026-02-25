@@ -523,8 +523,8 @@ class AtCoderBot(discord.Client):
         wd_ja = ["月", "火", "水", "木", "金", "土", "日"]
         embed.set_footer(text=f"{now.strftime(f'%Y年%m月%d日({wd_ja[now.weekday()]}) %H:%M')} 時点")
         return embed
-
-def create_contest_embed(self, name, url, st, dur_min, rated, details, is_start=False):
+    
+    def create_contest_embed(self, name, url, st, dur_min, rated, details, is_start=False):
         # Ratedに応じた色を取得
         color = self.get_rated_color(rated)
         embed = discord.Embed(title=name, url=url, color=color)
