@@ -250,24 +250,34 @@ class AtCoderBot(discord.Client):
 
     # --- 新規追加: 告知ページから詳細を抜く関数 ---
     async def fetch_post_details(self, session, contest_id):
+        """posts/{contest_id}_ja から詳細情報を取得（HTMLタグを完全除去）"""
         post_url = f"https://atcoder.jp/posts/{contest_id}_ja"
+        headers = {"User-Agent": "Mozilla/5.0"}
         info = {"writer": "不明", "tester": "不明", "points": "未発表"}
+        
         try:
-            async with session.get(post_url, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    post_body = soup.find('div', class_='blog-post')
-                    if post_body:
-                        text = post_body.get_text("\n")
-                        # 正規表現で抽出
-                        w = re.search(r'Writer：\s*(.*)', text)
-                        t = re.search(r'Tester：\s*(.*)', text)
-                        p = re.search(r'配点：\s*(.*)', text)
-                        if w: info["writer"] = w.group(1).strip()
-                        if t: info["tester"] = t.group(1).strip()
-                        if p: info["points"] = p.group(1).strip()
-        except: pass
+            async with session.get(post_url, headers=headers) as resp:
+                if resp.status != 200: return info
+                html_content = await resp.text()
+                soup = BeautifulSoup(html_content, 'html.parser')
+                post_body = soup.find('div', class_='blog-post')
+                
+                if post_body:
+                    # 全体のテキストを抽出（この時点でHTMLタグは消える）
+                    # separator="\n" を指定することで、項目ごとの改行を維持する
+                    lines = post_body.get_text(separator="\n").splitlines()
+                    
+                    for line in lines:
+                        line = line.strip()
+                        if line.startswith("Writer："):
+                            info["writer"] = line.replace("Writer：", "").strip()
+                        elif line.startswith("Tester："):
+                            info["tester"] = line.replace("Tester：", "").strip()
+                        elif line.startswith("配点："):
+                            info["points"] = line.replace("配点：", "").strip()
+        except Exception as e:
+            print(f"Error fetching details: {e}")
+            
         return info
 
     # --- 新規追加: 毎日6:00に予定を読み取るタスク ---
