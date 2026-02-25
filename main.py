@@ -51,20 +51,33 @@ class AtCoderBot(discord.Client):
             
     def get_rated_color(self, rated_str):
         """レーティング上限に基づいた色を返す"""
-        if not rated_str or "Unrated" in rated_str:
+        if not rated_str or "Unrated" in rated_str or rated_str == "-":
             return 0x808080  # 灰色
+        
+        # All(ヒューリスティック) 等の対応
         if "All" in rated_str:
-            return 0xFF0000  # 赤
+            return 0x800080  # 紫 (All)
         
-        # 「~ 1999」から 1999 を抽出
-        match = re.search(r'(\d+)', rated_str)
-        if not match: return 0x808080
-        
-        val = int(match.group(1))
-        if val < 1200: return 0x008000 # 緑
-        if val < 2000: return 0x0000FF # 青
-        if val < 2800: return 0xFF8000 # 橙
-        return 0xFF0000 # 赤
+        # AGCなどの「2000 ~」や「2000 ~ inf」の対応
+        if "~" in rated_str:
+            parts = rated_str.split("~")
+            # 「2000 ~」 のように後ろが空、または inf の場合は赤
+            if len(parts) > 1:
+                upper = parts[1].strip().lower()
+                lower = parts[0].strip()
+                if upper == "" or "inf" in upper or (lower.isdigit() and int(lower) >= 2000):
+                    return 0xFF0000  # 赤
+                
+                # 通常の「~ 1999」などは数字を抽出して判定
+                match = re.search(r'(\d+)', upper)
+                if match:
+                    val = int(match.group(1))
+                    if val < 1200: return 0x008000 # 緑
+                    if val < 2000: return 0x0000FF # 青
+                    if val < 2800: return 0xFF8000 # 橙
+                    return 0xFF0000 # 赤
+
+        return 0x808080 # デフォルト灰色
 
     def save_to_sheets(self):
         try:
@@ -688,6 +701,68 @@ async def preview(interaction: discord.Interaction, type: str):
         
     # 既に一度 response を使っている場合は followup を使う
     await interaction.followup.send(content=f"**Preview: {type}**", embed=e)
+
+
+@bot.tree.command(name="recent_contests", description="過去1週間のコンテスト告知を表示(テスト用)")
+async def recent_contests(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer()
+    except:
+        return
+
+    now = datetime.now(JST)
+    one_week_ago = now - timedelta(days=7)
+    
+    async with aiohttp.ClientSession() as session:
+        # コンテスト一覧ページを取得
+        async with session.get("https://atcoder.jp/contests/archive?lang=ja") as resp:
+            if resp.status != 200:
+                return await interaction.followup.send("コンテスト情報の取得に失敗しました。")
+            soup = BeautifulSoup(await resp.text(), 'html.parser')
+
+        table = soup.find('table')
+        if not table:
+            return await interaction.followup.send("コンテストテーブルが見つかりませんでした。")
+
+        rows = table.find_all('tr')[1:] # ヘッダー除外
+        found_contests = []
+
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) < 4: continue
+            
+            # 開始時刻
+            time_tag = cols[0].find('time')
+            if not time_tag: continue
+            st_dt = datetime.strptime(time_tag.text.strip(), '%Y-%m-%d %H:%M:%S%z').astimezone(JST)
+            
+            # 過去1週間以内か判定
+            if one_week_ago <= st_dt <= now:
+                a_tag = cols[1].find('a')
+                c_id = a_tag['href'].split('/')[-1]
+                c_name = a_tag.text.strip()
+                duration = cols[2].text.strip()
+                rated = cols[3].text.strip()
+                c_url = f"https://atcoder.jp/contests/{c_id}"
+                
+                # 詳細(Writer/Tester等)を取得
+                details = await bot.fetch_post_details(session, c_id)
+                found_contests.append({
+                    "name": c_name, "url": c_url, "st": st_dt, 
+                    "dur": duration, "rated": rated, "details": details
+                })
+
+        if not found_contests:
+            return await interaction.followup.send("過去1週間以内に開催されたコンテストはありません。")
+
+        # 1つずつEmbedを送信
+        for c in found_contests:
+            # 既存の create_contest_embed を利用
+            # 引数の型を調整 (dur を数値にする必要がある場合は parse_duration を通す)
+            embed = bot.create_contest_embed(
+                c['name'], c['url'], c['st'], c['dur'], c['rated'], c['details']
+            )
+            await interaction.followup.send(embed=embed)
 
 if __name__ == "__main__":
     keep_alive(); bot.run(os.getenv("DISCORD_TOKEN"))
