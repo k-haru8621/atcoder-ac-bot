@@ -49,35 +49,33 @@ class AtCoderBot(discord.Client):
             self.sheet = self.gc.open(SHEET_NAME)
         except Exception as e: print(f"⚠️ Sheetsエラー: {e}")
             
-    def get_rated_color(self, rated_str):
-        """レーティング上限に基づいた色を返す"""
-        if not rated_str or "Unrated" in rated_str or rated_str == "-":
+def get_rated_color(self, rated_str):
+        if not rated_str or rated_str in ["-", "Unrated"]:
             return 0x808080  # 灰色
         
-        # All(ヒューリスティック) 等の対応
         if "All" in rated_str:
-            return 0x800080  # 紫 (All)
-        
-        # AGCなどの「2000 ~」や「2000 ~ inf」の対応
+            return 0x800080  # 紫 (Heuristic等)
+
+        # 「2000 ~ 」や「~ 1999」を解析
         if "~" in rated_str:
             parts = rated_str.split("~")
-            # 「2000 ~」 のように後ろが空、または inf の場合は赤
-            if len(parts) > 1:
-                upper = parts[1].strip().lower()
-                lower = parts[0].strip()
-                if upper == "" or "inf" in upper or (lower.isdigit() and int(lower) >= 2000):
-                    return 0xFF0000  # 赤
-                
-                # 通常の「~ 1999」などは数字を抽出して判定
-                match = re.search(r'(\d+)', upper)
-                if match:
-                    val = int(match.group(1))
-                    if val < 1200: return 0x008000 # 緑
-                    if val < 2000: return 0x0000FF # 青
-                    if val < 2800: return 0xFF8000 # 橙
-                    return 0xFF0000 # 赤
+            lower = parts[0].strip()
+            upper = parts[1].strip().lower()
 
+            # 下限が2000以上、または上限が inf (空欄含む) なら赤
+            if (lower.isdigit() and int(lower) >= 2000) or upper == "" or "inf" in upper:
+                return 0xFF0000  # 赤
+            
+            # 上限の数値で判定
+            match = re.search(r'(\d+)', upper)
+            if match:
+                val = int(match.group(1))
+                if val < 1200: return 0x008000 # 緑
+                if val < 2000: return 0x0000FF # 青
+                return 0xFF8000 # 橙
+                
         return 0x808080 # デフォルト灰色
+
 
     def save_to_sheets(self):
         try:
@@ -249,36 +247,59 @@ class AtCoderBot(discord.Client):
             return None
 
     # --- 新規追加: 告知ページから詳細を抜く関数 ---
+    import html # ファイルの1行目付近に追加
+
     async def fetch_post_details(self, session, contest_id):
-        """posts/{contest_id}_ja から詳細情報を取得（HTMLタグを完全除去）"""
         post_url = f"https://atcoder.jp/posts/{contest_id}_ja"
-        headers = {"User-Agent": "Mozilla/5.0"}
         info = {"writer": "不明", "tester": "不明", "points": "未発表"}
-        
         try:
-            async with session.get(post_url, headers=headers) as resp:
+            async with session.get(post_url, timeout=10) as resp:
                 if resp.status != 200: return info
-                html_content = await resp.text()
-                soup = BeautifulSoup(html_content, 'html.parser')
+                raw_html = await resp.text()
+                # 1. &lt;a ... &gt; などの特殊文字を普通の < > に戻す
+                decoded_html = html.unescape(raw_html)
+                soup = BeautifulSoup(decoded_html, 'html.parser')
                 post_body = soup.find('div', class_='blog-post')
                 
                 if post_body:
-                    # 全体のテキストを抽出（この時点でHTMLタグは消える）
-                    # separator="\n" を指定することで、項目ごとの改行を維持する
-                    lines = post_body.get_text(separator="\n").splitlines()
-                    
-                    for line in lines:
+                    # 2. タグを無視してテキストのみ抽出（行ごとに分ける）
+                    text = post_body.get_text("\n")
+                    for line in text.splitlines():
                         line = line.strip()
-                        if line.startswith("Writer："):
-                            info["writer"] = line.replace("Writer：", "").strip()
-                        elif line.startswith("Tester："):
-                            info["tester"] = line.replace("Tester：", "").strip()
-                        elif line.startswith("配点："):
-                            info["points"] = line.replace("配点：", "").strip()
-        except Exception as e:
-            print(f"Error fetching details: {e}")
-            
+                        # 3. ハイフンやスペースを除去しつつキーワード判定
+                        if "Writer" in line and "：" in line:
+                            info["writer"] = line.split("：", 1)[-1].strip()
+                        elif "Tester" in line and "：" in line:
+                            info["tester"] = line.split("：", 1)[-1].strip()
+                        elif "配点" in line and "：" in line:
+                            info["points"] = line.split("：", 1)[-1].strip()
+        except:
+            pass
         return info
+
+
+    def format_duration(self, dur_str):
+        """'100分'や'01:40'を'1時間40分'に変換"""
+        if not dur_str: return "不明"
+        if "日" in dur_str: return dur_str # 「10日間」はそのまま
+        
+        try:
+            # 形式1: 「100 分」
+            if "分" in dur_str:
+                total_min = int(re.search(r'(\d+)', dur_str).group(1))
+            # 形式2: 「01:40」
+            elif ":" in dur_str:
+                h, m = map(int, dur_str.split(':'))
+                total_min = h * 60 + m
+            else:
+                return dur_str
+            
+            h, m = divmod(total_min, 60)
+            if h > 0:
+                return f"{h}時間{m}分" if m > 0 else f"{h}時間"
+            return f"{m}分"
+        except:
+            return dur_str
 
     # --- 新規追加: 毎日6:00に予定を読み取るタスク ---
     @tasks.loop(hours=24)
@@ -504,11 +525,14 @@ class AtCoderBot(discord.Client):
         embed.set_footer(text=f"{now.strftime(f'%Y年%m月%d日({wd_ja[now.weekday()]}) %H:%M')} 時点")
         return embed
 
-    def create_contest_embed(self, name, url, st, dur_min, rated, details, is_start=False):
-        # self.get_rated_color を呼び出すように変更
+def create_contest_embed(self, name, url, st, dur_min, rated, details, is_start=False):
+        # Ratedに応じた色を取得
         color = self.get_rated_color(rated)
         embed = discord.Embed(title=name, url=url, color=color)
         unix_time = int(st.timestamp())
+
+        # 【追加】時間を「1時間40分」形式に整形
+        formatted_dur = self.format_duration(dur_min)
 
         if is_start:
             embed.description = f"🚀 **開始しました！**\n\n📈 [順位表]({url}/standings)\n📄 [解説]({url}/editorial)"
@@ -516,10 +540,10 @@ class AtCoderBot(discord.Client):
             embed.description = (
                 f"**コンテストページ：** {url}\n"
                 f"**開始時刻：** {st.strftime('%Y-%m-%d %H:%M')}\n"
-                f"**コンテスト時間：** {dur_min} 分\n"
+                f"**コンテスト時間：** {formatted_dur}\n" # ← ここを dur_min から変更
                 f"**Writer：** {details.get('writer', '不明')}\n"
                 f"**Tester：** {details.get('tester', '不明')}\n"
-                f"**レーティング変化：** {rated}\n"
+                f"**Rated対象：** {rated}\n" # ← 名称を「Rated対象」に変更
                 f"**配点：** {details.get('points', '未発表')}\n"
                 f"**コンテスト開始まで：** <t:{unix_time}:R>"
             )
