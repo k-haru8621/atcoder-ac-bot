@@ -250,42 +250,49 @@ class AtCoderBot(discord.Client):
 
     async def fetch_post_details(self, session, contest_id):
         post_url = f"https://atcoder.jp/posts/{contest_id}_ja"
-        # 初期値を「空文字列」にします
-        info = {"writer": "", "tester": "", "points": ""}
+        info = {"writer": "不明", "tester": "不明", "points": "未発表"}
         headers = {"User-Agent": "Mozilla/5.0"}
         
         try:
             async with session.get(post_url, timeout=10, headers=headers) as resp:
-                if resp.status != 200:
-                    return info # Errorなら空のまま返す
-                
+                if resp.status != 200: return info
                 raw_html = await resp.text()
                 
+                # 1. BeautifulSoupでデコードして、HTMLとしてパースする
                 import html, re
-                decoded_all = html.unescape(raw_html)
-                # HTMLタグを全てスペースに置き換えて連結
-                clean_all = re.sub(r'<[^>]+>', ' ', decoded_all)
-                # コロンを統一
-                clean_all = clean_all.replace(':', '：')
-
-                # 正規表現を少し緩くして、キーワードの後ろをガサッと取る
-                # 取得できた場合のみ、infoの値を更新する
+                decoded_html = html.unescape(raw_html)
+                soup = BeautifulSoup(decoded_html, 'html.parser')
+                post_body = soup.find('div', class_='blog-post')
                 
-                # Writer: (名前...) - Tester: の間などを狙う
-                w_match = re.search(r'Writer：\s*(.*?)(?=- Tester：|- 配点|Tester：|配点：|$)', clean_all)
-                if w_match:
-                    info["writer"] = w_match.group(1).strip()
-
-                t_match = re.search(r'Tester：\s*(.*?)(?=- 配点：|- レーティング|配点：|レーティング：|$)', clean_all)
-                if t_match:
-                    info["tester"] = t_match.group(1).strip()
-
-                p_match = re.search(r'配点：\s*(.*?)(?=皆様|レーティング：|Writer：|Tester：|$)', clean_all)
-                if p_match:
-                    info["points"] = p_match.group(1).strip()
+                if post_body:
+                    # 2. 【重要】タグの中の文字だけを抽出して繋げる
+                    # 画像などのリンクの中にある名前もこれで抽出される
+                    full_text = post_body.get_text("\n", strip=True)
+                    
+                    # 3. テキストからキーワードを探す
+                    lines = full_text.splitlines()
+                    for line in lines:
+                        clean_line = line.replace(':', '：').lstrip('- ').strip()
+                        
+                        if 'Writer' in clean_line and '：' in clean_line:
+                            info["writer"] = clean_line.split('：', 1)[-1].strip()
+                        elif 'Tester' in clean_line and '：' in clean_line:
+                            info["tester"] = clean_line.split('：', 1)[-1].strip()
+                        elif '配点' in clean_line and '：' in clean_line:
+                            info["points"] = clean_line.split('：', 1)[-1].strip()
+                            
+                    # --- バックアップ処理 ---
+                    # もしWriterが「不明」のままなら、行をまたいでいる可能性があるので、
+                    # テキスト全体からキーワードを探す
+                    if info["writer"] == "不明":
+                        if 'Writer：' in full_text:
+                            # 'Writer：' の後の文字を抽出して、次のキーワードまでを取る
+                            # (このコンテストの場合、Testerの手前まで)
+                            part = full_text.split('Writer：', 1)[-1]
+                            info["writer"] = part.split('Tester：', 1)[0].strip()
 
         except Exception as e:
-            pass # エラー時は空文字列のまま
+            print(f"❌ 詳細解析エラー: {e}")
             
         return info
 
