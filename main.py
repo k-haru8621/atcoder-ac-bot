@@ -250,48 +250,42 @@ class AtCoderBot(discord.Client):
 
     async def fetch_post_details(self, session, contest_id):
         post_url = f"https://atcoder.jp/posts/{contest_id}_ja"
-        # 初期値を「解析中...」にして、何が起きているか見えるようにします
-        info = {"writer": "未取得", "tester": "未取得", "points": "未取得"}
+        # 初期値を「空文字列」にします
+        info = {"writer": "", "tester": "", "points": ""}
         headers = {"User-Agent": "Mozilla/5.0"}
         
         try:
             async with session.get(post_url, timeout=10, headers=headers) as resp:
                 if resp.status != 200:
-                    return {"writer": f"Error:{resp.status}", "tester": "-", "points": "-"}
+                    return info # Errorなら空のまま返す
                 
                 raw_html = await resp.text()
                 
                 import html, re
-                # 1. HTMLの階層を無視して、中身のテキストだけを巨大な1行にする
-                # &lt; などを < に戻す
                 decoded_all = html.unescape(raw_html)
-                # 全てのタグをスペース1つに置換して、文字だけを繋げる
+                # HTMLタグを全てスペースに置き換えて連結
                 clean_all = re.sub(r'<[^>]+>', ' ', decoded_all)
-                # 改行や連続スペースを整理
-                clean_all = " ".join(clean_all.split())
                 # コロンを統一
                 clean_all = clean_all.replace(':', '：')
 
-                # 2. 「Writer：」から後ろ300文字くらいを強引に取ってみる
-                # どこまでが名前か判定せずに、とりあえず後ろを出す
-                w_match = re.search(r'Writer：\s*(.{1,200})', clean_all)
+                # 正規表現を少し緩くして、キーワードの後ろをガサッと取る
+                # 取得できた場合のみ、infoの値を更新する
+                
+                # Writer: (名前...) - Tester: の間などを狙う
+                w_match = re.search(r'Writer：\s*(.*?)(?=- Tester：|- 配点|Tester：|配点：|$)', clean_all)
                 if w_match:
-                    # 次の項目っぽい単語が出るところで一応切る
-                    raw_val = re.split(r'Tester|配点|レーティング|皆様|コンテスト', w_match.group(1))[0]
-                    info["writer"] = raw_val.strip()
+                    info["writer"] = w_match.group(1).strip()
 
-                t_match = re.search(r'Tester：\s*(.{1,200})', clean_all)
+                t_match = re.search(r'Tester：\s*(.*?)(?=- 配点：|- レーティング|配点：|レーティング：|$)', clean_all)
                 if t_match:
-                    raw_val = re.split(r'Writer|配点|レーティング|皆様|コンテスト', t_match.group(1))[0]
-                    info["tester"] = raw_val.strip()
+                    info["tester"] = t_match.group(1).strip()
 
-                p_match = re.search(r'配点：\s*(.{1,200})', clean_all)
+                p_match = re.search(r'配点：\s*(.*?)(?=皆様|レーティング：|Writer：|Tester：|$)', clean_all)
                 if p_match:
-                    raw_val = re.split(r'Writer|Tester|レーティング|皆様|コンテスト', p_match.group(1))[0]
-                    info["points"] = raw_val.strip()
+                    info["points"] = p_match.group(1).strip()
 
         except Exception as e:
-            info["writer"] = f"解析失敗: {str(e)[:20]}"
+            pass # エラー時は空文字列のまま
             
         return info
 
